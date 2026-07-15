@@ -2,13 +2,8 @@
   "name": "claude-emote",
   "version": "0.1.0",
   "description": "Animated pixel-art avatar pane for Claude Code. Ports pi-emote's animation engine and replaces Pi lifecycle events with Claude Code hooks.",
-  "author": "claude-emote contributors",
-  "license": "MIT",
-  "homepage": "https://github.com/example/claude-emote",
-  "keywords": [
-    "claude-code",
-    "avatar",
-    "pixel-art",
-    "pi-emote"
-  ]
+  "author": {
+    "name": "claude-emote contributors"
+  },
+  "license": "MIT"
 }

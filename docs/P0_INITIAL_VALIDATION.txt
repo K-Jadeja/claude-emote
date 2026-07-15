@@ -1,0 +1,30 @@
+Validating plugin manifest: D:\Workspace\Github-Projects\claudecodeavatar\.claude-plugin\plugin.json
+
+✘ Found 1 error:
+
+  ❯ author: Invalid input: expected object, received string
+
+Validating hooks: D:\Workspace\Github-Projects\claudecodeavatar\hooks\hooks.json
+
+✘ Found 18 errors:
+
+  ❯ hooks.SessionStart.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.UserPromptSubmit.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.PreToolUse.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.PostToolUse.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.PostToolUseFailure.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.PostToolBatch.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.PermissionRequest.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.PermissionDenied.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.SubagentStart.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.SubagentStop.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.TaskCreated.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.TaskCompleted.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.Stop.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.StopFailure.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.PreCompact.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.PostCompact.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.SessionEnd.0.hooks: Invalid input: expected array, received undefined
+  ❯ hooks.MessageDisplay.0.hooks: Invalid input: expected array, received undefined
+
+✘ Validation failed
