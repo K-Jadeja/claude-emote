@@ -134,13 +134,55 @@ export function mapEvent(event: HookEvent): AvatarReaction {
 /**
  * Convenience wrapper that tolerates malformed input. The bridge always
  * feeds raw JSON to this function so we never throw out of the mapper.
+ *
+ * Structural validation:
+ *   - Non-object / missing hook_event_name → { state: null }
+ *   - Unknown event name → { state: null } (default case)
+ *   - Known event name but required fields missing → { state: null }
+ *     (the mapper does NOT silently coerce a bad MessageDisplay into a
+ *     "talk" reaction when the turn_id / message_id / index / final /
+ *     delta fields are absent).
  */
 export function mapEventSafe(raw: unknown): AvatarReaction {
   if (!raw || typeof raw !== "object") return { state: null };
   const obj = raw as Record<string, unknown>;
   const name = obj.hook_event_name;
   if (typeof name !== "string") return { state: null };
-  // The mapper is type-narrowed by the discriminated union; here we re-cast
-  // and trust that the underlying event matches the documented schema.
+
+  // Per-event structural checks. Unknown names fall through to mapEvent
+  // (which has a default case returning {state: null}).
+  switch (name) {
+    case "MessageDisplay":
+      if (
+        typeof obj.turn_id !== "string" ||
+        typeof obj.message_id !== "string" ||
+        typeof obj.index !== "number" ||
+        typeof obj.final !== "boolean" ||
+        typeof obj.delta !== "string"
+      ) {
+        return { state: null };
+      }
+      break;
+    case "SessionStart":
+    case "UserPromptSubmit":
+    case "PreToolUse":
+    case "PostToolUse":
+    case "PostToolUseFailure":
+    case "PostToolBatch":
+    case "PermissionRequest":
+    case "PermissionDenied":
+    case "SubagentStart":
+    case "SubagentStop":
+    case "TaskCreated":
+    case "TaskCompleted":
+    case "Stop":
+    case "StopFailure":
+    case "PreCompact":
+    case "PostCompact":
+    case "SessionEnd":
+      if (typeof obj.session_id !== "string") return { state: null };
+      break;
+  }
+
   return mapEvent(obj as unknown as HookEvent);
 }

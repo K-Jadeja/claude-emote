@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { mapEvent, mapEventSafe } from "../../src/claude/event-mapper.js";
 import type { HookEvent } from "../../src/claude/hook-event.js";
+import type { AvatarReaction } from "../../src/claude/event-mapper.js";
 
 const FIXTURE_DIR = join(process.cwd(), "tests", "fixtures");
 
@@ -109,21 +110,35 @@ describe("EventMapper (M3)", () => {
     }
   });
 
-  it("malformed MessageDisplay input fails open (does not throw)", () => {
+  it("malformed MessageDisplay input fails open (mapEventSafe returns null state without throwing)", () => {
     // Per the spec, the bridge / mapper must not crash on malformed
-    // input. The mapper is allowed to return any state; the contract is
-    // simply that the call resolves.
+    // input. A structurally invalid MessageDisplay (missing turn_id,
+    // message_id, index, final, or delta) is treated as "no opinion" —
+    // the mapper does NOT silently coerce it to a "talk" reaction.
     const bad = {
       hook_event_name: "MessageDisplay",
       session_id: "x",
       // missing turn_id, message_id, index, final, delta
     };
-    expect(() => mapEvent(bad as unknown as HookEvent)).not.toThrow();
-    const reaction = mapEvent(bad as unknown as HookEvent);
+    let reaction: AvatarReaction | undefined;
+    expect(() => {
+      reaction = mapEventSafe(bad);
+    }).not.toThrow();
     expect(reaction).toBeDefined();
-    // Empty / missing delta is treated as no talk token; the avatar still
-    // transitions to talk because the event name matched.
-    expect(reaction.talkToken).toBeUndefined();
+    expect(reaction!.state).toBeNull();
+  });
+
+  it("mapEventSafe returns null state for missing session_id on known events", () => {
+    const bad = { hook_event_name: "Stop" };
+    const r = mapEventSafe(bad);
+    expect(r.state).toBeNull();
+  });
+
+  it("mapEventSafe returns null state for non-object input", () => {
+    for (const v of [null, undefined, 42, "string", true, []]) {
+      const r = mapEventSafe(v);
+      expect(r.state).toBeNull();
+    }
   });
 
   it("mapEventSafe tolerates malformed input without throwing", () => {
