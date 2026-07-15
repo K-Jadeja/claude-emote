@@ -1,150 +1,309 @@
 /**
- * avatar-args.test.ts (P4 unit)
+ * avatar-args.test.ts (P4 correctness repair)
  *
- * Pure-function tests for the avatar process argument parser. Covers both
- * --flag=value and --flag value forms, CLI > env > default priority, and
- * graceful fallback to env when a flag is missing.
+ * The parser exposes exactly one public function:
+ *
+ *   parseAvatarProcessOptions(argv, env): AvatarProcessOptions
+ *
+ * Each field has three states: not supplied / valid supplied / invalid
+ * supplied. An invalid explicit CLI value throws BEFORE environment
+ * fallback. An invalid environment value throws rather than silently
+ * becoming a default. Exact defaults:
+ *
+ *   port       = 0
+ *   instanceId = "standalone"
+ *   parentPid  = null
+ *   emoteDir   = `${cwd}/emotes/ascii`
  */
 
 import { describe, it, expect } from "vitest";
-import { parseCliArgs, resolveAvatarConfig } from "../../src/host/avatar-args.js";
+import {
+  parseAvatarProcessOptions,
+  AvatarParseError,
+} from "../../src/host/avatar-args.js";
 
-describe("parseCliArgs (P4)", () => {
-  describe("--flag=value form", () => {
+const EMPTY_ENV: NodeJS.ProcessEnv = {};
+const cwd = process.cwd();
+
+describe("parseAvatarProcessOptions (P4)", () => {
+  describe("--flag=value and --flag value forms", () => {
     it("parses --port=1234", () => {
-      expect(parseCliArgs(["--port=1234"])).toEqual({ port: 1234 });
+      expect(parseAvatarProcessOptions(["--port=1234"], EMPTY_ENV).port).toBe(
+        1234,
+      );
+    });
+    it("parses --port 1234", () => {
+      expect(parseAvatarProcessOptions(["--port", "1234"], EMPTY_ENV).port).toBe(
+        1234,
+      );
     });
     it("parses --instance=abc", () => {
-      expect(parseCliArgs(["--instance=abc"])).toEqual({ instanceId: "abc" });
-    });
-    it("parses --emoteDir=path", () => {
-      expect(parseCliArgs(["--emoteDir=D:/emotes"])).toEqual({
-        emoteDir: "D:/emotes",
-      });
-    });
-    it("parses --parentPid=999", () => {
-      expect(parseCliArgs(["--parentPid=999"])).toEqual({ parentPid: 999 });
-    });
-    it("parses all four together in any order", () => {
       expect(
-        parseCliArgs([
-          "--port=51234",
-          "--instance=test",
-          "--emoteDir=D:/emotes",
-          "--parentPid=42",
-        ]),
-      ).toEqual({
-        port: 51234,
-        instanceId: "test",
-        emoteDir: "D:/emotes",
-        parentPid: 42,
-      });
-    });
-  });
-
-  describe("--flag value form (two-arg)", () => {
-    it("parses --port 1234", () => {
-      expect(parseCliArgs(["--port", "1234"])).toEqual({ port: 1234 });
+        parseAvatarProcessOptions(["--instance=abc"], EMPTY_ENV).instanceId,
+      ).toBe("abc");
     });
     it("parses --instance abc", () => {
-      expect(parseCliArgs(["--instance", "abc"])).toEqual({ instanceId: "abc" });
+      expect(
+        parseAvatarProcessOptions(["--instance", "abc"], EMPTY_ENV).instanceId,
+      ).toBe("abc");
     });
-    it("parses --emoteDir D:/emotes", () => {
-      expect(parseCliArgs(["--emoteDir", "D:/emotes"])).toEqual({
-        emoteDir: "D:/emotes",
+    it("parses --emoteDir=path and --emoteDir path", () => {
+      const eq = parseAvatarProcessOptions(
+        ["--emoteDir=D:/emotes"],
+        EMPTY_ENV,
+      ).emoteDir;
+      const sp = parseAvatarProcessOptions(
+        ["--emoteDir", "D:/emotes"],
+        EMPTY_ENV,
+      ).emoteDir;
+      expect(eq).toBe("D:/emotes");
+      expect(sp).toBe("D:/emotes");
+    });
+    it("parses --parentPid=999 and --parentPid 999", () => {
+      expect(
+        parseAvatarProcessOptions(["--parentPid=999"], EMPTY_ENV).parentPid,
+      ).toBe(999);
+      expect(
+        parseAvatarProcessOptions(["--parentPid", "999"], EMPTY_ENV).parentPid,
+      ).toBe(999);
+    });
+  });
+
+  describe("documented defaults (no CLI, no env)", () => {
+    it("port === 0", () => {
+      expect(parseAvatarProcessOptions([], EMPTY_ENV).port).toBe(0);
+    });
+    it('instanceId === "standalone"', () => {
+      expect(parseAvatarProcessOptions([], EMPTY_ENV).instanceId).toBe(
+        "standalone",
+      );
+    });
+    it("parentPid === null", () => {
+      expect(parseAvatarProcessOptions([], EMPTY_ENV).parentPid).toBeNull();
+    });
+    it("emoteDir === `${cwd}/emotes/ascii`", () => {
+      expect(parseAvatarProcessOptions([], EMPTY_ENV).emoteDir).toBe(
+        `${cwd}/emotes/ascii`,
+      );
+    });
+  });
+
+  describe("CLI > env > default (valid values)", () => {
+    it("CLI beats env for every field", () => {
+      const opts = parseAvatarProcessOptions(
+        [
+          "--port=1234",
+          "--instance=cli",
+          "--emoteDir=D:/cli",
+          "--parentPid=42",
+        ],
+        {
+          CLAUDE_EMOTE_PORT: "8080",
+          CLAUDE_EMOTE_INSTANCE_ID: "from-env",
+          CLAUDE_EMOTE_EMOTE_DIR: "D:/env",
+          CLAUDE_EMOTE_PARENT_PID: "99",
+        },
+      );
+      expect(opts.port).toBe(1234);
+      expect(opts.instanceId).toBe("cli");
+      expect(opts.emoteDir).toBe("D:/cli");
+      expect(opts.parentPid).toBe(42);
+    });
+    it("env beats default when CLI is absent", () => {
+      const opts = parseAvatarProcessOptions([], {
+        CLAUDE_EMOTE_PORT: "8080",
+        CLAUDE_EMOTE_INSTANCE_ID: "from-env",
+        CLAUDE_EMOTE_EMOTE_DIR: "D:/env",
+        CLAUDE_EMOTE_PARENT_PID: "99",
       });
+      expect(opts.port).toBe(8080);
+      expect(opts.instanceId).toBe("from-env");
+      expect(opts.emoteDir).toBe("D:/env");
+      expect(opts.parentPid).toBe(99);
     });
-    it("parses --parentPid 42", () => {
-      expect(parseCliArgs(["--parentPid", "42"])).toEqual({ parentPid: 42 });
+    it("--port=0 is valid and triggers OS assignment", () => {
+      const opts = parseAvatarProcessOptions(
+        ["--port=0", "--instance=port-zero"],
+        EMPTY_ENV,
+      );
+      expect(opts.port).toBe(0);
+      expect(opts.instanceId).toBe("port-zero");
     });
   });
 
-  describe("edge cases", () => {
-    it("returns an empty object for empty argv", () => {
-      expect(parseCliArgs([])).toEqual({});
+  describe("invalid explicit CLI throws BEFORE env fallback", () => {
+    it("CLI --port=abc with env 8080 → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--port=abc"], { CLAUDE_EMOTE_PORT: "8080" }),
+      ).toThrow(/--port must be an integer/);
     });
-    it("ignores unknown flags", () => {
-      expect(parseCliArgs(["--unknown=foo", "--port=1"])).toEqual({ port: 1 });
+    it("CLI --port=-1 with env 8080 → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--port=-1"], { CLAUDE_EMOTE_PORT: "8080" }),
+      ).toThrow(/--port must be in \[0, 65535\]/);
     });
-    it("ignores non-numeric values for numeric flags (falls back to env/default)", () => {
-      // We do not throw; the value is silently dropped from the CLI result.
-      expect(parseCliArgs(["--port=abc"]).port).toBeUndefined();
-      expect(parseCliArgs(["--port", "abc"]).port).toBeUndefined();
+    it("CLI --port=70000 with env 8080 → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--port=70000"], {
+          CLAUDE_EMOTE_PORT: "8080",
+        }),
+      ).toThrow(/--port must be in \[0, 65535\]/);
     });
-    it("does not consume a flag-looking value after --flag (treated as missing)", () => {
-      // If the user writes `--port --instance=99`, we treat `--instance=99`
-      // as the next flag (not as --port's value, since it starts with --).
-      // --port therefore has no CLI value and falls back to env/default.
-      // The next iteration parses `--instance=99` as a separate flag.
-      expect(parseCliArgs(["--port", "--instance=99"])).toEqual({
-        instanceId: "99",
-      });
+    it("CLI --port (bare) with env 8080 → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--port"], { CLAUDE_EMOTE_PORT: "8080" }),
+      ).toThrow(/--port requires/);
+    });
+    it("CLI --port --instance=x with env 8080 → throws (port is missing its value)", () => {
+      expect(() =>
+        parseAvatarProcessOptions(
+          ["--port", "--instance=x"],
+          { CLAUDE_EMOTE_PORT: "8080" },
+        ),
+      ).toThrow(/--port requires/);
+    });
+    it("CLI --parentPid=abc with valid env PID → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--parentPid=abc"], {
+          CLAUDE_EMOTE_PARENT_PID: "99",
+        }),
+      ).toThrow(/--parentPid must be an integer/);
+    });
+    it("CLI --parentPid=0 with valid env PID → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--parentPid=0"], {
+          CLAUDE_EMOTE_PARENT_PID: "99",
+        }),
+      ).toThrow(/--parentPid must be a positive integer/);
+    });
+    it("CLI --parentPid=-5 with valid env PID → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--parentPid=-5"], {
+          CLAUDE_EMOTE_PARENT_PID: "99",
+        }),
+      ).toThrow(/--parentPid must be a positive integer/);
+    });
+    it('CLI --instance= (empty) with valid env instance → throws', () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--instance="], {
+          CLAUDE_EMOTE_INSTANCE_ID: "from-env",
+        }),
+      ).toThrow(/--instance requires a non-empty value/);
+    });
+    it("CLI --instance= (empty value, the form bash produces from --instance='') with valid env → throws", () => {
+      // After bash strips the quotes from --instance="", the shell passes
+      // `--instance=` (empty value). The parser must reject this.
+      expect(() =>
+        parseAvatarProcessOptions(["--instance="], {
+          CLAUDE_EMOTE_INSTANCE_ID: "from-env",
+        }),
+      ).toThrow(/--instance requires a non-empty value/);
+    });
+    it("CLI --instance (bare) with valid env → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--instance"], {
+          CLAUDE_EMOTE_INSTANCE_ID: "from-env",
+        }),
+      ).toThrow(/--instance requires/);
+    });
+    it("CLI --emoteDir= (empty) with valid env path → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--emoteDir="], {
+          CLAUDE_EMOTE_EMOTE_DIR: "D:/env",
+        }),
+      ).toThrow(/--emoteDir requires a non-empty value/);
     });
   });
-});
 
-describe("resolveAvatarConfig (P4) — CLI > env > default", () => {
-  it("uses CLI value when supplied", () => {
-    const { config } = resolveAvatarConfig(
-      ["--port=1234", "--instance=cli"],
-      { CLAUDE_EMOTE_PORT: "9999", CLAUDE_EMOTE_INSTANCE_ID: "env" },
-    );
-    expect(config.port).toBe(1234);
-    expect(config.instanceId).toBe("cli");
-  });
-
-  it("uses env value when CLI is absent", () => {
-    const { config } = resolveAvatarConfig([], {
-      CLAUDE_EMOTE_PORT: "8080",
-      CLAUDE_EMOTE_INSTANCE_ID: "from-env",
-      CLAUDE_EMOTE_EMOTE_DIR: "D:/emotes",
-      CLAUDE_EMOTE_PARENT_PID: "777",
+  describe("invalid env throws when CLI is absent", () => {
+    it("CLAUDE_EMOTE_PORT=abc → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions([], { CLAUDE_EMOTE_PORT: "abc" }),
+      ).toThrow(/CLAUDE_EMOTE_PORT must be an integer/);
     });
-    expect(config.port).toBe(8080);
-    expect(config.instanceId).toBe("from-env");
-    expect(config.emoteDir).toBe("D:/emotes");
-    expect(config.parentPid).toBe(777);
-  });
-
-  it("uses defaults when neither CLI nor env is present", () => {
-    const { config } = resolveAvatarConfig([], {});
-    expect(config.port).toBe(0);
-    expect(config.instanceId).toBe("");
-    expect(config.emoteDir).toBeNull();
-    expect(config.parentPid).toBe(0);
-  });
-
-  it("CLI takes precedence over env even for the two-arg form", () => {
-    const { config } = resolveAvatarConfig(
-      ["--port", "5555"],
-      { CLAUDE_EMOTE_PORT: "1111" },
-    );
-    expect(config.port).toBe(5555);
-  });
-
-  it("CLI takes precedence over env for emoteDir and parentPid", () => {
-    const { config } = resolveAvatarConfig(
-      ["--emoteDir=cli-dir", "--parentPid=42"],
-      { CLAUDE_EMOTE_EMOTE_DIR: "env-dir", CLAUDE_EMOTE_PARENT_PID: "99" },
-    );
-    expect(config.emoteDir).toBe("cli-dir");
-    expect(config.parentPid).toBe(42);
-  });
-
-  it("returns unknown flags in the unknown[] list", () => {
-    const { unknown } = resolveAvatarConfig(
-      ["--port=1", "--bogus=2", "--instance=x", "--another"],
-      {},
-    );
-    expect(unknown).toEqual(["--bogus=2", "--another"]);
-  });
-
-  it("ignores invalid numeric env vars (uses default)", () => {
-    const { config } = resolveAvatarConfig([], {
-      CLAUDE_EMOTE_PORT: "not-a-number",
-      CLAUDE_EMOTE_PARENT_PID: "also-not",
+    it("CLAUDE_EMOTE_PORT=99999 → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions([], { CLAUDE_EMOTE_PORT: "99999" }),
+      ).toThrow(/CLAUDE_EMOTE_PORT must be in \[0, 65535\]/);
     });
-    expect(config.port).toBe(0);
-    expect(config.parentPid).toBe(0);
+    it('CLAUDE_EMOTE_INSTANCE_ID="" → throws', () => {
+      expect(() =>
+        parseAvatarProcessOptions([], { CLAUDE_EMOTE_INSTANCE_ID: "" }),
+      ).toThrow(/CLAUDE_EMOTE_INSTANCE_ID must not be empty/);
+    });
+    it("CLAUDE_EMOTE_PARENT_PID=abc → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions([], { CLAUDE_EMOTE_PARENT_PID: "abc" }),
+      ).toThrow(/CLAUDE_EMOTE_PARENT_PID must be an integer/);
+    });
+    it("CLAUDE_EMOTE_PARENT_PID=-5 → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions([], { CLAUDE_EMOTE_PARENT_PID: "-5" }),
+      ).toThrow(/CLAUDE_EMOTE_PARENT_PID must be a positive integer/);
+    });
+    it("CLAUDE_EMOTE_PARENT_PID=0 → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions([], { CLAUDE_EMOTE_PARENT_PID: "0" }),
+      ).toThrow(/CLAUDE_EMOTE_PARENT_PID must be a positive integer/);
+    });
+    it("CLAUDE_EMOTE_EMOTE_DIR= (empty) → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions([], { CLAUDE_EMOTE_EMOTE_DIR: "" }),
+      ).toThrow(/CLAUDE_EMOTE_EMOTE_DIR must not be empty/);
+    });
+  });
+
+  describe("missing-value handling", () => {
+    it("--port (bare, end of argv) → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--port"], EMPTY_ENV),
+      ).toThrow(/--port requires/);
+    });
+    it("--instance (bare, end of argv) → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--instance"], EMPTY_ENV),
+      ).toThrow(/--instance requires/);
+    });
+    it("--emoteDir (bare, end of argv) → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--emoteDir"], EMPTY_ENV),
+      ).toThrow(/--emoteDir requires/);
+    });
+    it("--parentPid (bare, end of argv) → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--parentPid"], EMPTY_ENV),
+      ).toThrow(/--parentPid requires/);
+    });
+    it("--port= (empty value) → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--port="], EMPTY_ENV),
+      ).toThrow(/--port requires/);
+    });
+    it("--instance= (empty value) → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--instance="], EMPTY_ENV),
+      ).toThrow(/--instance requires/);
+    });
+    it("--emoteDir= (empty value) → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--emoteDir="], EMPTY_ENV),
+      ).toThrow(/--emoteDir requires/);
+    });
+    it("--parentPid= (empty value) → throws", () => {
+      expect(() =>
+        parseAvatarProcessOptions(["--parentPid="], EMPTY_ENV),
+      ).toThrow(/--parentPid requires/);
+    });
+  });
+
+  describe("error type", () => {
+    it("throws an AvatarParseError", () => {
+      try {
+        parseAvatarProcessOptions(["--port=abc"], EMPTY_ENV);
+        expect.fail("should have thrown");
+      } catch (e) {
+        expect(e).toBeInstanceOf(AvatarParseError);
+      }
+    });
   });
 });

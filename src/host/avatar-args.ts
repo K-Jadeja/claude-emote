@@ -1,204 +1,255 @@
 /**
  * avatar-args.ts
  *
- * Pure argument parser for the avatar process CLI. Kept separate so the
- * parsing logic can be unit-tested without spawning a process.
+ * Pure argument parser for the avatar process CLI. Public API:
  *
- * Resolution priority (highest first):
- *   1. CLI argument (--port=1234 or --port 1234)
- *   2. Environment variable (CLAUDE_EMOTE_PORT, etc.)
- *   3. Safe default
+ *   export interface AvatarProcessOptions {
+ *     port: number;
+ *     instanceId: string;
+ *     emoteDir: string;
+ *     parentPid: number | null;
+ *   }
  *
- * Only the flags documented for the avatar are parsed. Anything else
- * (e.g. a stray path) is left in `unknown[]` so callers can detect a
- * misuse without crashing the process.
+ *   export function parseAvatarProcessOptions(
+ *     argv: string[],
+ *     env: NodeJS.ProcessEnv,
+ *   ): AvatarProcessOptions
+ *
+ * Three-state validation per field:
+ *
+ *   1. value not supplied      → fall back to env, then to documented default
+ *   2. valid value supplied    → use it
+ *   3. invalid value supplied  → throw AvatarParseError
+ *
+ * Resolution priority per field (highest first):
+ *
+ *   valid explicit CLI value
+ *   valid environment value
+ *   documented default
+ *
+ * Invalid explicit CLI values throw BEFORE environment fallback. Invalid
+ * environment values throw (they do not silently fall back to defaults).
+ *
+ * The parser is pure with respect to (argv, env, process.cwd()): same
+ * inputs always produce the same outputs.
  */
 
-const KNOWN_FLAGS = new Set([
-  "--port",
-  "--instance",
-  "--emoteDir",
-  "--parentPid",
-]);
-
-export interface AvatarConfig {
-  /** Resolved TCP port. 0 means "let the OS pick". */
+export interface AvatarProcessOptions {
   port: number;
-  /** Resolved instance id (defaults to a per-process local id). */
   instanceId: string;
-  /** Resolved emote-set directory or null when none supplied. */
-  emoteDir: string | null;
-  /** Resolved parent PID (0 when unknown / not supplied). */
-  parentPid: number;
+  emoteDir: string;
+  parentPid: number | null;
 }
 
-export interface ParsedArgs {
-  config: AvatarConfig;
-  /** argv entries that did not match any known avatar flag. */
-  unknown: string[];
+export class AvatarParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AvatarParseError";
+  }
 }
 
-const DEFAULTS: AvatarConfig = {
-  port: 0,
-  instanceId: "",
-  emoteDir: null,
-  parentPid: 0,
+const FLAG_NAMES = ["port", "instance", "emoteDir", "parentPid"] as const;
+type FlagName = (typeof FLAG_NAMES)[number];
+
+/** Map CLI flag name to its corresponding environment variable. */
+const FLAG_TO_ENV: Record<FlagName, string> = {
+  port: "CLAUDE_EMOTE_PORT",
+  instance: "CLAUDE_EMOTE_INSTANCE_ID",
+  emoteDir: "CLAUDE_EMOTE_EMOTE_DIR",
+  parentPid: "CLAUDE_EMOTE_PARENT_PID",
 };
 
-/**
- * Parse a CLI argv list into an AvatarConfig. Supports:
- *   --port=1234      and  --port 1234
- *   --instance=abc   and  --instance abc
- *   --emoteDir=...   and  --emoteDir ...
- *   --parentPid=N    and  --parentPid N
- */
-export function parseCliArgs(argv: string[]): Partial<AvatarConfig> {
-  const out: Partial<AvatarConfig> = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
+interface FlagOccurrence {
+  /** True when the flag appears anywhere on the command line. */
+  present: boolean;
+  /**
+   * The captured value:
+   *   - string for --flag=value or --flag value (both forms)
+   *   - null for bare --flag with no value (e.g. --port with nothing after,
+   *     or --port followed immediately by another --flag).
+   *   - undefined for "not present"
+   */
+  value: string | null | undefined;
+}
 
-    // --flag=value form.
-    const eq = a.indexOf("=");
-    if (eq > 0 && a.startsWith("--")) {
-      const flag = a.slice(0, eq);
-      const value = a.slice(eq + 1);
-      if (KNOWN_FLAGS.has(flag)) {
-        applyFlag(out, flag, value);
-        continue;
-      }
-    }
-
-    // --flag value form (two-arg). When value looks like another flag
-    // we treat it as missing — the caller will fall back to env.
-    if (KNOWN_FLAGS.has(a)) {
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith("--")) {
-        applyFlag(out, a, next);
-        i++;
-      }
-    }
+/** Read every occurrence of the four known flags out of argv. */
+function scanCli(argv: string[]): Map<FlagName, FlagOccurrence> {
+  const out = new Map<FlagName, FlagOccurrence>();
+  for (const name of FLAG_NAMES) {
+    out.set(name, { present: false, value: undefined });
   }
+
+  let i = 0;
+  while (i < argv.length) {
+    const token = argv[i]!;
+    let matched: FlagName | null = null;
+    for (const name of FLAG_NAMES) {
+      const prefix = `--${name}`;
+      if (token === prefix || token.startsWith(`${prefix}=`)) {
+        matched = name;
+        break;
+      }
+    }
+    if (matched === null) {
+      i++;
+      continue;
+    }
+    const prefix = `--${matched}`;
+    if (token.startsWith(`${prefix}=`)) {
+      // --flag=value
+      const value = token.slice(prefix.length + 1);
+      out.set(matched, { present: true, value });
+      i++;
+      continue;
+    }
+    // --flag (two-arg form)
+    const next = argv[i + 1];
+    if (next === undefined || next.startsWith("--")) {
+      // Bare flag with no value, or followed immediately by another flag.
+      out.set(matched, { present: true, value: null });
+      i++;
+      continue;
+    }
+    out.set(matched, { present: true, value: next });
+    i += 2;
+  }
+
   return out;
 }
 
-function applyFlag(out: Partial<AvatarConfig>, flag: string, value: string): void {
-  switch (flag) {
-    case "--port": {
-      const n = Number(value);
-      if (Number.isFinite(n)) out.port = n;
-      break;
-    }
-    case "--instance": {
-      out.instanceId = value;
-      break;
-    }
-    case "--emoteDir": {
-      out.emoteDir = value;
-      break;
-    }
-    case "--parentPid": {
-      const n = Number(value);
-      if (Number.isFinite(n)) out.parentPid = n;
-      break;
-    }
-  }
+function isBlank(s: string): boolean {
+  return s.trim() === "";
 }
 
-/**
- * Resolve a single field with CLI > env > default priority.
- *
- * `env` is passed in (not read from process.env) so unit tests can drive
- * the resolver without mutating global state.
- */
-function resolve<T>(
-  flag: string,
-  envName: string,
-  env: NodeJS.ProcessEnv,
-  cliValue: T | undefined,
-  parse: (raw: string) => T | undefined,
-  fallback: T,
-): T {
-  if (cliValue !== undefined) {
-    dbgSet(`[avatar-args] ${flag}: from CLI = ${String(cliValue)}`);
-    return cliValue;
-  }
-  const envRaw = env[envName];
-  if (envRaw !== undefined && envRaw !== "") {
-    const parsed = parse(envRaw);
-    if (parsed !== undefined) {
-      dbgSet(`[avatar-args] ${flag}: from env ${envName} = ${String(parsed)}`);
-      return parsed;
+function resolveStringField(
+  name: FlagName,
+  occ: FlagOccurrence,
+  envValue: string | undefined,
+  defaultValue: () => string,
+): string {
+  if (occ.present) {
+    if (occ.value === null || occ.value === undefined || isBlank(occ.value)) {
+      throw new AvatarParseError(`--${name} requires a non-empty value`);
     }
+    return occ.value;
   }
-  dbgSet(`[avatar-args] ${flag}: default = ${String(fallback)}`);
-  return fallback;
+  if (envValue !== undefined) {
+    if (isBlank(envValue)) {
+      throw new AvatarParseError(
+        `${FLAG_TO_ENV[name]} must not be empty`,
+      );
+    }
+    return envValue;
+  }
+  return defaultValue();
 }
 
-let dbgSink: ((msg: string) => void) | null = null;
-export function setAvatarArgsDebug(sink: ((msg: string) => void) | null): void {
-  dbgSink = sink;
-}
-function dbgSet(msg: string): void {
-  if (dbgSink) dbgSink(msg);
+function resolvePortField(
+  occ: FlagOccurrence,
+  envValue: string | undefined,
+): number {
+  if (occ.present) {
+    if (occ.value === null || occ.value === undefined || occ.value === "") {
+      throw new AvatarParseError(`--port requires a value`);
+    }
+    const n = Number(occ.value);
+    if (!Number.isInteger(n)) {
+      throw new AvatarParseError(
+        `--port must be an integer, got "${occ.value}"`,
+      );
+    }
+    if (n < 0 || n > 65535) {
+      throw new AvatarParseError(
+        `--port must be in [0, 65535], got ${n}`,
+      );
+    }
+    return n;
+  }
+  if (envValue !== undefined && envValue !== "") {
+    const n = Number(envValue);
+    if (!Number.isInteger(n)) {
+      throw new AvatarParseError(
+        `CLAUDE_EMOTE_PORT must be an integer, got "${envValue}"`,
+      );
+    }
+    if (n < 0 || n > 65535) {
+      throw new AvatarParseError(
+        `CLAUDE_EMOTE_PORT must be in [0, 65535], got ${n}`,
+      );
+    }
+    return n;
+  }
+  return 0;
 }
 
-/**
- * Read `process.env` exactly once (so tests can pass a stub env) and
- * combine it with parsed CLI args to produce the resolved AvatarConfig.
- */
-export function resolveAvatarConfig(
+function resolveParentPidField(
+  occ: FlagOccurrence,
+  envValue: string | undefined,
+): number | null {
+  if (occ.present) {
+    if (occ.value === null || occ.value === undefined || occ.value === "") {
+      throw new AvatarParseError(`--parentPid requires a value`);
+    }
+    const n = Number(occ.value);
+    if (!Number.isInteger(n)) {
+      throw new AvatarParseError(
+        `--parentPid must be an integer, got "${occ.value}"`,
+      );
+    }
+    if (n < 1) {
+      throw new AvatarParseError(
+        `--parentPid must be a positive integer, got ${n}`,
+      );
+    }
+    return n;
+  }
+  if (envValue !== undefined && envValue !== "") {
+    const n = Number(envValue);
+    if (!Number.isInteger(n)) {
+      throw new AvatarParseError(
+        `CLAUDE_EMOTE_PARENT_PID must be an integer, got "${envValue}"`,
+      );
+    }
+    if (n < 1) {
+      throw new AvatarParseError(
+        `CLAUDE_EMOTE_PARENT_PID must be a positive integer, got ${n}`,
+      );
+    }
+    return n;
+  }
+  return null;
+}
+
+/** Single public entry point. */
+export function parseAvatarProcessOptions(
   argv: string[],
-  env: NodeJS.ProcessEnv = process.env,
-): ParsedArgs {
-  const cli = parseCliArgs(argv);
-  const unknown = argv.filter((a) => {
-    if (!a.startsWith("--")) return false;
-    const eq = a.indexOf("=");
-    const flag = eq > 0 ? a.slice(0, eq) : a;
-    return !KNOWN_FLAGS.has(flag);
-  });
+  env: NodeJS.ProcessEnv,
+): AvatarProcessOptions {
+  const cli = scanCli(argv);
+  const envPort = env.CLAUDE_EMOTE_PORT;
+  const envInstance = env.CLAUDE_EMOTE_INSTANCE_ID;
+  const envEmoteDir = env.CLAUDE_EMOTE_EMOTE_DIR;
+  const envParentPid = env.CLAUDE_EMOTE_PARENT_PID;
 
-  const port = resolve(
-    "--port",
-    "CLAUDE_EMOTE_PORT",
-    env,
-    cli.port,
-    (raw) => {
-      const n = Number(raw);
-      return Number.isFinite(n) ? n : undefined;
-    },
-    DEFAULTS.port,
+  const port = resolvePortField(cli.get("port")!, envPort);
+  const instanceId = resolveStringField(
+    "instance",
+    cli.get("instance")!,
+    envInstance,
+    () => "standalone",
   );
-  const instanceId = resolve(
-    "--instance",
-    "CLAUDE_EMOTE_INSTANCE_ID",
-    env,
-    cli.instanceId,
-    (raw) => raw || undefined,
-    DEFAULTS.instanceId,
+  // emoteDir default is the documented project default: ${cwd}/emotes/ascii.
+  // Resolved in exactly one place, here. Tests assert this exact string.
+  const emoteDir = resolveStringField(
+    "emoteDir",
+    cli.get("emoteDir")!,
+    envEmoteDir,
+    () => `${process.cwd()}/emotes/ascii`,
   );
-  const emoteDir = resolve(
-    "--emoteDir",
-    "CLAUDE_EMOTE_EMOTE_DIR",
-    env,
-    cli.emoteDir,
-    (raw) => raw || undefined,
-    DEFAULTS.emoteDir,
-  );
-  const parentPid = resolve(
-    "--parentPid",
-    "CLAUDE_EMOTE_PARENT_PID",
-    env,
-    cli.parentPid,
-    (raw) => {
-      const n = Number(raw);
-      return Number.isFinite(n) ? n : undefined;
-    },
-    DEFAULTS.parentPid,
+  const parentPid = resolveParentPidField(
+    cli.get("parentPid")!,
+    envParentPid,
   );
 
-  return {
-    config: { port, instanceId, emoteDir, parentPid },
-    unknown,
-  };
+  return { port, instanceId, emoteDir, parentPid };
 }

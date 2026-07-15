@@ -99,7 +99,15 @@ export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
       if (req.method === "GET" && url.pathname === "/health") {
-        return writeJson(res, 200, { ok: true, instanceId: opts.instanceId });
+        return writeJson(res, 200, {
+          ok: true,
+          instanceId: opts.instanceId,
+          // `opts.port` is mutated to the actual bound port inside the
+          // server.listen() callback below. After listen resolves this is
+          // the OS-assigned port (which may differ from the requested one
+          // when the launcher passed --port=0).
+          port: opts.port,
+        });
       }
 
       if (req.method !== "POST" || url.pathname !== "/event") {
@@ -138,7 +146,12 @@ export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
 
     server.listen(opts.port, "127.0.0.1", () => {
       const addr = server.address();
-      const port = typeof addr === "object" && addr ? addr.port : opts.port;
+      const actualPort = typeof addr === "object" && addr ? addr.port : opts.port;
+      // Mutate opts.port so the /health handler (registered earlier in
+      // this scope) reads the actual bound port even when the caller
+      // requested --port=0.
+      opts.port = actualPort;
+      const port = actualPort;
       const url = `http://127.0.0.1:${port}`;
       dbg(`listening on ${url}`);
       if (LOG_FILE) {

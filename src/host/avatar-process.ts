@@ -13,17 +13,23 @@
  *
  * Configuration (CLI > env > default; see avatar-args.ts):
  *   --port=1234       / CLAUDE_EMOTE_PORT        (default: 0 = OS picks)
- *   --instance=...    / CLAUDE_EMOTE_INSTANCE_ID (default: local-<pid>)
- *   --emoteDir=...    / CLAUDE_EMOTE_EMOTE_DIR   (default: null)
- *   --parentPid=N     / CLAUDE_EMOTE_PARENT_PID  (default: 0)
+ *   --instance=...    / CLAUDE_EMOTE_INSTANCE_ID (default: "standalone")
+ *   --emoteDir=...    / CLAUDE_EMOTE_EMOTE_DIR   (default: ${cwd}/emotes/ascii)
+ *   --parentPid=N     / CLAUDE_EMOTE_PARENT_PID  (default: null)
+ *
+ * Invalid CLI values throw BEFORE env fallback. Invalid env values throw
+ * rather than silently falling back to defaults.
  *
  * Environment variables:
  *   CLAUDE_EMOTE_DEBUG=1          — verbose stderr logging
  *   CLAUDE_EMOTE_LOG_FILE=<path>  — optional persistent log file
  */
 
-import { startServer, waitForHealth, type AvatarServer } from "./avatar-server.js";
-import { resolveAvatarConfig, setAvatarArgsDebug } from "./avatar-args.js";
+import { startServer, type AvatarServer } from "./avatar-server.js";
+import {
+  parseAvatarProcessOptions,
+  AvatarParseError,
+} from "./avatar-args.js";
 import { Animator } from "../core/animator.js";
 import { StandaloneRenderHost } from "../adapters/standalone-render-host.js";
 import { createRenderer } from "../adapters/renderer-factory.js";
@@ -32,139 +38,146 @@ import { detectTerminalName } from "../core/terminal.js";
 import { setDebug } from "../core/log.js";
 import type { AvatarReaction } from "../claude/event-mapper.js";
 
-const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
-setDebug(debug);
-if (debug) {
-  setAvatarArgsDebug((msg) => process.stderr.write(msg + "\n"));
-}
+async function main(): Promise<void> {
+  const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
+  setDebug(debug);
 
-const { config: avatarCfg, unknown } = resolveAvatarConfig(process.argv.slice(2));
-const instanceId = avatarCfg.instanceId || `local-${process.pid}`;
-const port = avatarCfg.port;
-const emoteDir = avatarCfg.emoteDir;
-const parentPid = avatarCfg.parentPid;
-
-if (debug) {
-  process.stderr.write(
-    `[avatar-process] instance=${instanceId} port=${port} emoteDir=${emoteDir ?? "(default)"} parent=${parentPid}\n`,
-  );
-}
-if (unknown.length > 0 && debug) {
-  process.stderr.write(
-    `[avatar-process] ignored unknown args: ${unknown.join(" ")}\n`,
-  );
-}
-
-// --- Build the renderer -----------------------------------------------------
-
-const extDir = process.cwd();
-const { config, userConfiguredTerminals } = loadLayeredConfig(extDir, process.cwd());
-if (emoteDir) {
-  // Override the resolved emote-set dir with what the launcher asked for.
-  config.emotes = [{ model: "*", "emote-set": emoteDir.split(/[\\/]/).pop() ?? "default" }];
-}
-
-const { renderer, resolved, setTuiHost } = createRenderer(
-  config,
-  extDir,
-  emoteDir ?? `${extDir}/emotes/ascii`,
-  userConfiguredTerminals,
-);
-if (debug) {
-  process.stderr.write(
-    `[avatar-process] terminal=${detectTerminalName()} protocol=${resolved.protocol} multiplexer=${resolved.multiplexer ?? "(none)"}\n`,
-  );
-  if (resolved.warning) process.stderr.write(`[avatar-process] ${resolved.warning}\n`);
-}
-
-const host = new StandaloneRenderHost();
-host.start();
-setTuiHost(host);
-
-const animator = new Animator(config, renderer);
-
-// --- HTTP server ------------------------------------------------------------
-
-let server: AvatarServer | null = null;
-let shuttingDown = false;
-
-function onEvent(reaction: AvatarReaction, _raw: unknown): void {
-  if (reaction.shutdown) {
-    shutdown("session_end");
+  // --- Parse configuration first. On failure, exit cleanly without
+  // touching the renderer or binding an HTTP server. ---
+  let options;
+  try {
+    options = parseAvatarProcessOptions(process.argv.slice(2), process.env);
+  } catch (err) {
+    const msg =
+      err instanceof AvatarParseError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    process.stderr.write(`[avatar-process] invalid configuration: ${msg}\n`);
+    process.exit(2);
     return;
   }
-  if (reaction.state) animator.transitionTo(reaction.state);
-}
 
-function onMessageDelta(content: string): void {
-  animator.onTalkToken(content);
-}
+  const { instanceId, port, emoteDir, parentPid } = options;
 
-async function shutdown(reason: string): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  if (debug) process.stderr.write(`[avatar-process] shutdown: ${reason}\n`);
-  try {
-    animator.clearAllTimers();
-  } catch {}
-  try {
-    renderer.dispose();
-  } catch {}
-  host.shutdown();
-  if (server) {
-    try {
-      await server.close();
-    } catch {}
+  if (debug) {
+    process.stderr.write(
+      `[avatar-process] instance=${instanceId} port=${port} emoteDir=${emoteDir} parent=${parentPid ?? "null"}\n`,
+    );
   }
-  // Give the OS a moment to flush the cursor-show bytes.
-  setTimeout(() => process.exit(0), 50).unref();
-}
 
-// --- Lifecycle --------------------------------------------------------------
+  // --- Build the renderer ----------------------------------------------------
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("uncaughtException", (err) => {
-  if (debug) process.stderr.write(`[avatar-process] uncaught: ${err.message}\n`);
-  shutdown("uncaughtException");
-});
+  const extDir = process.cwd();
+  const { config, userConfiguredTerminals } = loadLayeredConfig(
+    extDir,
+    process.cwd(),
+  );
+  // The parser already produced a resolved emoteDir (never null).
+  config.emotes = [
+    { model: "*", "emote-set": emoteDir.split(/[\\/]/).pop() ?? "default" },
+  ];
 
-// Parent process watcher: if the launcher dies, we don't want to leave
-// a zombie avatar. Check every second; bail out if parent is gone.
-if (parentPid > 0) {
-  const interval = setInterval(() => {
-    try {
-      process.kill(parentPid, 0);
-    } catch {
-      // Parent is gone — shut down with a small grace period.
-      clearInterval(interval);
-      if (debug) process.stderr.write(`[avatar-process] parent ${parentPid} disappeared\n`);
-      setTimeout(() => shutdown("parent_gone"), 500).unref();
+  const { renderer, resolved, setTuiHost } = createRenderer(
+    config,
+    extDir,
+    emoteDir,
+    userConfiguredTerminals,
+  );
+  if (debug) {
+    process.stderr.write(
+      `[avatar-process] terminal=${detectTerminalName()} protocol=${resolved.protocol} multiplexer=${resolved.multiplexer ?? "(none)"}\n`,
+    );
+    if (resolved.warning) process.stderr.write(`[avatar-process] ${resolved.warning}\n`);
+  }
+
+  const host = new StandaloneRenderHost();
+  host.start();
+  setTuiHost(host);
+
+  const animator = new Animator(config, renderer);
+
+  // --- HTTP server -----------------------------------------------------------
+
+  let server: AvatarServer | null = null;
+  let shuttingDown = false;
+
+  function onEvent(reaction: AvatarReaction, _raw: unknown): void {
+    if (reaction.shutdown) {
+      shutdown("session_end");
+      return;
     }
-  }, 1_000);
-  interval.unref();
-}
+    if (reaction.state) animator.transitionTo(reaction.state);
+  }
 
-// Start the server and print the URL on stdout in a structured form so
-// the launcher can scrape it. (We use stdout here because that's how the
-// launcher reads it back; bridge contracts say stdout must be empty, but
-// that's the *bridge* process, not the avatar process.)
-startServer({ instanceId, port, onEvent, onMessageDisplayDelta: onMessageDelta })
-  .then((s) => {
-    server = s;
-    // Signal readiness to the launcher.
-    process.stdout.write(`CLAUDE_EMOTE_READY url=${s.url} instance=${instanceId}\n`);
-  })
-  .catch((err) => {
-    if (debug) process.stderr.write(`[avatar-process] start failed: ${err.message}\n`);
-    process.exit(1);
+  function onMessageDelta(content: string): void {
+    animator.onTalkToken(content);
+  }
+
+  async function shutdown(reason: string): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    if (debug) process.stderr.write(`[avatar-process] shutdown: ${reason}\n`);
+    try {
+      animator.clearAllTimers();
+    } catch {}
+    try {
+      renderer.dispose();
+    } catch {}
+    host.shutdown();
+    if (server) {
+      try {
+        await server.close();
+      } catch {}
+    }
+    setTimeout(() => process.exit(0), 50).unref();
+  }
+
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("uncaughtException", (err) => {
+    if (debug) process.stderr.write(`[avatar-process] uncaught: ${err.message}\n`);
+    shutdown("uncaughtException");
   });
 
-// Diagnostic: wait briefly and confirm the health check works end-to-end.
-setTimeout(() => {
-  if (server) {
-    waitForHealth(server.url, 1000).then((ok) => {
-      if (debug) process.stderr.write(`[avatar-process] self-health: ${ok ? "ok" : "fail"}\n`);
-    });
+  // Parent-PID watcher. The parser returns null when no parent was
+  // supplied, in which case we skip the watcher entirely.
+  if (parentPid !== null) {
+    const interval = setInterval(() => {
+      try {
+        process.kill(parentPid, 0);
+      } catch {
+        clearInterval(interval);
+        if (debug) {
+          process.stderr.write(
+            `[avatar-process] parent ${parentPid} disappeared\n`,
+          );
+        }
+        setTimeout(() => shutdown("parent_gone"), 500).unref();
+      }
+    }, 1_000);
+    interval.unref();
   }
-}, 200).unref();
+
+  // Start the server. The READY marker includes the actual bound port so
+  // a --port=0 launch is observable end-to-end.
+  try {
+    server = await startServer({
+      instanceId,
+      port,
+      onEvent,
+      onMessageDisplayDelta: onMessageDelta,
+    });
+    process.stdout.write(
+      `CLAUDE_EMOTE_READY url=${server.url} instance=${instanceId} port=${server.port} parentPid=${parentPid ?? "null"}\n`,
+    );
+  } catch (err) {
+    process.stderr.write(
+      `[avatar-process] failed to bind server: ${(err as Error).message}\n`,
+    );
+    process.exit(1);
+  }
+}
+
+main();
