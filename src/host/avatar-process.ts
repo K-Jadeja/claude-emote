@@ -11,17 +11,19 @@
  * Owns nothing about Claude Code or the launcher — it does not know
  * whether the events came from hooks, a test harness, or a manual curl.
  *
+ * Configuration (CLI > env > default; see avatar-args.ts):
+ *   --port=1234       / CLAUDE_EMOTE_PORT        (default: 0 = OS picks)
+ *   --instance=...    / CLAUDE_EMOTE_INSTANCE_ID (default: local-<pid>)
+ *   --emoteDir=...    / CLAUDE_EMOTE_EMOTE_DIR   (default: null)
+ *   --parentPid=N     / CLAUDE_EMOTE_PARENT_PID  (default: 0)
+ *
  * Environment variables:
- *   CLAUDE_EMOTE_INSTANCE_ID      — random ID, used for log correlation
- *   CLAUDE_EMOTE_PORT             — port to listen on (0 = pick one)
- *   CLAUDE_EMOTE_EMOTE_DIR        — emote set directory
  *   CLAUDE_EMOTE_DEBUG=1          — verbose stderr logging
  *   CLAUDE_EMOTE_LOG_FILE=<path>  — optional persistent log file
- *   CLAUDE_EMOTE_PARENT_PID       — parent's PID; if it disappears the
- *                                    avatar shuts down after a grace period.
  */
 
 import { startServer, waitForHealth, type AvatarServer } from "./avatar-server.js";
+import { resolveAvatarConfig, setAvatarArgsDebug } from "./avatar-args.js";
 import { Animator } from "../core/animator.js";
 import { StandaloneRenderHost } from "../adapters/standalone-render-host.js";
 import { createRenderer } from "../adapters/renderer-factory.js";
@@ -30,16 +32,26 @@ import { detectTerminalName } from "../core/terminal.js";
 import { setDebug } from "../core/log.js";
 import type { AvatarReaction } from "../claude/event-mapper.js";
 
-const instanceId = process.env.CLAUDE_EMOTE_INSTANCE_ID ?? `local-${process.pid}`;
-const port = Number(process.env.CLAUDE_EMOTE_PORT ?? 0);
-const emoteDir = process.env.CLAUDE_EMOTE_EMOTE_DIR;
-const parentPid = Number(process.env.CLAUDE_EMOTE_PARENT_PID ?? 0);
 const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
 setDebug(debug);
+if (debug) {
+  setAvatarArgsDebug((msg) => process.stderr.write(msg + "\n"));
+}
+
+const { config: avatarCfg, unknown } = resolveAvatarConfig(process.argv.slice(2));
+const instanceId = avatarCfg.instanceId || `local-${process.pid}`;
+const port = avatarCfg.port;
+const emoteDir = avatarCfg.emoteDir;
+const parentPid = avatarCfg.parentPid;
 
 if (debug) {
   process.stderr.write(
     `[avatar-process] instance=${instanceId} port=${port} emoteDir=${emoteDir ?? "(default)"} parent=${parentPid}\n`,
+  );
+}
+if (unknown.length > 0 && debug) {
+  process.stderr.write(
+    `[avatar-process] ignored unknown args: ${unknown.join(" ")}\n`,
   );
 }
 
