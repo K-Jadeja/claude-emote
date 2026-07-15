@@ -2,30 +2,32 @@
 /**
  * bin/claude-emote.cjs
  *
- * Placeholder for M3. The full launcher (Windows Terminal pane management,
- * port allocation, health handshake, child process orchestration) is
- * implemented in Milestone 4 at `src/launcher/claude-emote.ts`.
- *
- * For now this entry point prints a useful error so anyone running
- * `claude-emote` before M4 lands gets a clear message.
+ * Thin CJS wrapper around the compiled launcher at
+ * dist/launcher/claude-emote.js. The TypeScript source lives in
+ * src/launcher/claude-emote.ts; this shim exists so `npm install -g`
+ * can wire up the `claude-emote` bin entry on any platform.
  */
 
 const path = require("node:path");
+const { spawn } = require("node:child_process");
+const { existsSync } = require("node:fs");
 
-console.error(
-  "[claude-emote] Launcher not yet built — this is the M3 placeholder.",
-);
-console.error(
-  "[claude-emote] The full launcher ships in Milestone 4 (src/launcher/claude-emote.ts).",
-);
-console.error(
-  "[claude-emote] For now, you can manually run the avatar server and bridge independently:",
-);
-console.error("");
-console.error("  1. Build:                  npm run build");
-console.error("  2. Start the avatar:       node dist/host/avatar-process.js");
-console.error("  3. Set the endpoint:       $env:CLAUDE_EMOTE_ENDPOINT='http://127.0.0.1:<port>/event'");
-console.error("  4. Configure your hook to point at dist/claude/hook-bridge.js");
-console.error("");
-console.error("See docs/HOOK_PROTOCOL.md for the contract details.");
-process.exit(1);
+const projectRoot = path.resolve(__dirname, "..");
+const launcher = path.join(projectRoot, "dist", "launcher", "claude-emote.js");
+
+if (!existsSync(launcher)) {
+  console.error(
+    "[claude-emote] dist/launcher/claude-emote.js not found. Run `npm run build` first.",
+  );
+  process.exit(1);
+}
+
+const child = spawn(process.execPath, [launcher, ...process.argv.slice(2)], {
+  stdio: "inherit",
+  env: process.env,
+});
+child.on("close", (code) => process.exit(code ?? 0));
+child.on("error", (err) => {
+  console.error(`[claude-emote] failed to start launcher: ${err.message}`);
+  process.exit(1);
+});
