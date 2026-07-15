@@ -1,0 +1,27 @@
+{
+  "enabled": true,
+  "debug": false,
+  "size": 8,
+  "readingSpeed": 4,
+  "hideBelow": 20,
+  "holdDuration": {
+    "hi": 2000,
+    "success": 1200,
+    "failure": 1200
+  },
+  "blinkInterval": [3000, 6000],
+  "talkTickMs": 120,
+  "cycleMs": 500,
+  "emotes": [
+    { "model": "*", "emote-set": "default" }
+  ],
+  "terminals": [
+    { "match": "zellij", "render": "ascii" },
+    { "match": "tmux", "render": "auto" },
+    { "match": "screen", "render": "ascii" },
+    { "match": "windows-terminal", "render": "sixel" },
+    { "match": "vscode", "render": "ascii" },
+    { "match": "wezterm", "render": "iterm2" },
+    { "match": "ghostty", "render": "kitty" }
+  ]
+}

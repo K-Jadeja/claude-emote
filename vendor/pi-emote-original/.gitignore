@@ -1,0 +1,6 @@
+.pi/
+.tmp/
+emotes/_test/
+debug.log
+node_modules/
+package-lock.json

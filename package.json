@@ -1,0 +1,29 @@
+{
+  "name": "claude-emote",
+  "version": "0.1.0",
+  "description": "Animated pixel-art avatar for Claude Code, ported from pi-emote.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "claude-emote": "bin/claude-emote.cjs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "benchmark:bridge": "node --experimental-strip-types scripts/benchmark-bridge.ts",
+    "demo": "node --experimental-strip-types scripts/demo-states.ts",
+    "verify:upstream": "node scripts/verify-upstream.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5",
+    "@types/node": "^20.14.10"
+  }
+}
