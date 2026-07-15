@@ -15,7 +15,7 @@
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "benchmark:bridge": "node --experimental-strip-types scripts/benchmark-bridge.ts",
-    "demo": "node --experimental-strip-types scripts/demo-states.ts",
+    "demo": "node scripts/demo-states.mjs",
     "verify:upstream": "node scripts/verify-upstream.mjs"
   },
   "dependencies": {
