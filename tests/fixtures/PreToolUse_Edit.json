@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "session-fixture-001",
+  "tool_name": "Edit",
+  "tool_input": { "file_path": "src/example.ts", "new_text": "hello" }
+}

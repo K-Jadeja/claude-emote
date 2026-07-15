@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-hooks.json",
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "SubagentStart": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "SubagentStop": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "TaskCreated": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "StopFailure": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "PreCompact": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "PostCompact": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "SessionEnd": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ],
+    "MessageDisplay": [
+      {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/dist/claude/hook-bridge.js"],
+        "timeout": 2
+      }
+    ]
+  }
+}

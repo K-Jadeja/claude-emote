@@ -1,0 +1,4 @@
+{
+  "hook_event_name": "PostCompact",
+  "session_id": "session-fixture-001"
+}

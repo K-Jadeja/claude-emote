@@ -1,0 +1,7 @@
+{
+  "hook_event_name": "PostToolUseFailure",
+  "session_id": "session-fixture-001",
+  "tool_name": "Bash",
+  "tool_input": { "command": "false" },
+  "error": "exit code 1"
+}

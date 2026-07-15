@@ -1,0 +1,5 @@
+{
+  "hook_event_name": "PostToolBatch",
+  "session_id": "session-fixture-001",
+  "tool_names": ["Read", "Edit"]
+}

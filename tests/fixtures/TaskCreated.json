@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "TaskCreated",
+  "session_id": "session-fixture-001",
+  "task_id": "task-12",
+  "description": "Add tests for bridge"
+}

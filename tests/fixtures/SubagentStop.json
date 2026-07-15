@@ -1,0 +1,5 @@
+{
+  "hook_event_name": "SubagentStop",
+  "session_id": "session-fixture-001",
+  "subagent_id": "subagent-7"
+}

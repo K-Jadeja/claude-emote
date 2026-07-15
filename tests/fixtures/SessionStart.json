@@ -1,0 +1,7 @@
+{
+  "hook_event_name": "SessionStart",
+  "session_id": "session-fixture-001",
+  "cwd": "C:/Workspace/example",
+  "source": "cli",
+  "model": "claude-sonnet-4-6"
+}

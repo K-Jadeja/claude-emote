@@ -1,0 +1,5 @@
+{
+  "hook_event_name": "TaskCompleted",
+  "session_id": "session-fixture-001",
+  "task_id": "task-12"
+}

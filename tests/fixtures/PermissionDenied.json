@@ -1,0 +1,5 @@
+{
+  "hook_event_name": "PermissionDenied",
+  "session_id": "session-fixture-001",
+  "tool_name": "Bash"
+}

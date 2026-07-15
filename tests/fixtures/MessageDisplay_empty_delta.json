@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "MessageDisplay",
+  "session_id": "session-fixture-001",
+  "type": "delta",
+  "content": ""
+}

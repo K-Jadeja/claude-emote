@@ -1,0 +1,142 @@
+/**
+ * event-mapper.ts
+ *
+ * Single source of truth for the mapping from Claude Code hook events to
+ * upstream `EmoteState`s and animator token events.
+ *
+ * Why one file:
+ *   Per the project specification, mapping logic must not be spread across
+ *   hooks, the launcher, or the renderer. Anything that turns a Claude
+ *   event into an avatar reaction must funnel through `mapEvent()`.
+ *
+ * Priority rules (mirrored in docs/STATE_MACHINE.md):
+ *   1. SessionEnd is destructive — the avatar process should shut down and
+ *      not transition through any further states.
+ *   2. Failure states (failure / compact) temporarily outrank ordinary
+ *      activity, so a recent failure or compact should not be cancelled by
+ *      an immediate PostToolUse that arrives during the hold window.
+ *   3. The mapper is intentionally *stateless* — it just emits a target
+ *      state plus, for MessageDisplay, a talk token. The Animator owns
+ *      timers and cancellation.
+ */
+
+import type { EmoteState } from "../core/types.js";
+import {
+  type HookEvent,
+  READ_TOOLS,
+  WRITE_TOOLS,
+} from "./hook-event.js";
+
+export interface AvatarReaction {
+  /** The avatar state to transition to. `null` means "no change". */
+  state: EmoteState | null;
+  /**
+   * Optional talk token to feed to the Animator. Currently only emitted
+   * for MessageDisplay delta events.
+   */
+  talkToken?: string;
+  /** Whether the avatar process should shut down (SessionEnd only). */
+  shutdown?: boolean;
+}
+
+/**
+ * Tool-name -> avatar-state. Anything not listed falls back to "tool".
+ */
+function toolState(toolName: string): EmoteState {
+  if (READ_TOOLS.has(toolName)) return "read";
+  if (WRITE_TOOLS.has(toolName)) return "write";
+  return "tool";
+}
+
+/**
+ * Map a single Claude hook event to an avatar reaction.
+ *
+ * Returns `{state: null}` for events the mapper intentionally ignores so
+ * the caller can distinguish "no opinion" from "definitely transition".
+ */
+export function mapEvent(event: HookEvent): AvatarReaction {
+  switch (event.hook_event_name) {
+    case "SessionStart":
+      // Spec: hi, followed by normal animator transition to idle.
+      return { state: "hi" };
+
+    case "UserPromptSubmit":
+      return { state: "think" };
+
+    case "MessageDisplay":
+      // Per spec: ignore empty deltas for mouth accounting but still honour final.
+      // We always emit "talk" for any non-null display event; the Animator owns
+      // the timer that returns the avatar to idle.
+      return {
+        state: "talk",
+        talkToken: event.type === "delta" ? event.content : undefined,
+      };
+
+    case "PreToolUse":
+      return { state: toolState(event.tool_name) };
+
+    case "PostToolUse":
+      // Spec: transient read, then think. We emit think here because the
+      // Animator's normal state transitions cover the visual cycle; the
+      // "transient read" comes from the prior PreToolUse cycle ending.
+      return { state: "think" };
+
+    case "PostToolUseFailure":
+      return { state: "failure" };
+
+    case "PostToolBatch":
+      return { state: "think" };
+
+    case "PermissionRequest":
+      // V1: think. Permission decisions come via PermissionDenied / decision callbacks.
+      return { state: "think" };
+
+    case "PermissionDenied":
+      return { state: "failure" };
+
+    case "SubagentStart":
+      return { state: "tool" };
+
+    case "SubagentStop":
+      return { state: "think" };
+
+    case "TaskCreated":
+      return { state: "tool" };
+
+    case "TaskCompleted":
+      return { state: "think" };
+
+    case "PreCompact":
+      return { state: "compact" };
+
+    case "PostCompact":
+      return { state: "idle" };
+
+    case "Stop":
+      return { state: "idle" };
+
+    case "StopFailure":
+      return { state: "failure" };
+
+    case "SessionEnd":
+      return { state: null, shutdown: true };
+
+    default:
+      // Unknown / future event names: ignore but never throw.
+      return { state: null };
+  }
+}
+
+/**
+ * Convenience wrapper that tolerates malformed input. The bridge always
+ * feeds raw JSON to this function so we never throw out of the mapper.
+ */
+export function mapEventSafe(raw: unknown): AvatarReaction {
+  if (!raw || typeof raw !== "object") return { state: null };
+  const obj = raw as Record<string, unknown>;
+  const name = obj.hook_event_name;
+  if (typeof name !== "string") return { state: null };
+  // The mapper is type-narrowed by the discriminated union; here we re-cast
+  // and trust that the underlying event matches the documented schema.
+  return mapEvent(obj as unknown as HookEvent);
+}

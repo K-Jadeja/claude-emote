@@ -1,0 +1,7 @@
+{
+  "hook_event_name": "PostToolUse",
+  "session_id": "session-fixture-001",
+  "tool_name": "Read",
+  "tool_input": { "file_path": "src/example.ts" },
+  "tool_response": { "ok": true }
+}
