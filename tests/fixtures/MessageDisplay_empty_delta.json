@@ -1,6 +1,9 @@
 {
   "hook_event_name": "MessageDisplay",
   "session_id": "session-fixture-001",
-  "type": "delta",
-  "content": ""
+  "turn_id": "turn-1",
+  "message_id": "msg-42",
+  "index": 0,
+  "final": false,
+  "delta": ""
 }

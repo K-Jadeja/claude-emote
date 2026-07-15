@@ -48,12 +48,20 @@ export interface HookUserPromptSubmit {
 export interface HookMessageDisplay {
   hook_event_name: "MessageDisplay";
   session_id: string;
-  /** "delta" streams; "final" marks the end of one Claude turn. */
-  type: "delta" | "final";
-  /** Text content. May be empty for empty delta updates. */
-  content: string;
-  /** Optional message/turn identifier. */
-  message_id?: string;
+  /** Identifier for the Claude turn (one user prompt → one turn). */
+  turn_id: string;
+  /** Identifier for the assistant message within the turn. */
+  message_id: string;
+  /** 0-based index of this delta within the message. */
+  index: number;
+  /**
+   * True on the final delta of a message. Per the Claude Code contract,
+   * `Stop` (not `final`) is the event that owns the transition out of
+   * "talk". `final` is informational and is forwarded as-is.
+   */
+  final: boolean;
+  /** Text content of this delta. May be empty. */
+  delta: string;
 }
 export interface HookPreToolUse {
   hook_event_name: "PreToolUse";

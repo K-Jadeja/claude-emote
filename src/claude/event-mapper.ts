@@ -63,14 +63,18 @@ export function mapEvent(event: HookEvent): AvatarReaction {
     case "UserPromptSubmit":
       return { state: "think" };
 
-    case "MessageDisplay":
-      // Per spec: ignore empty deltas for mouth accounting but still honour final.
-      // We always emit "talk" for any non-null display event; the Animator owns
-      // the timer that returns the avatar to idle.
+    case "MessageDisplay": {
+      // Always transition to talk. The Animator's own duration timer owns
+      // the transition back to idle; `Stop` is the only other event that
+      // can end the turn. The talk token is forwarded verbatim; the
+      // Animator's onTalkToken() handles zero-length deltas. Defensive
+      // against missing fields so the bridge never crashes on bad input.
+      const delta = (event as { delta?: unknown }).delta;
       return {
         state: "talk",
-        talkToken: event.type === "delta" ? event.content : undefined,
+        talkToken: typeof delta === "string" && delta.length > 0 ? delta : undefined,
       };
+    }
 
     case "PreToolUse":
       return { state: toolState(event.tool_name) };
