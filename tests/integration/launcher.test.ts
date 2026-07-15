@@ -30,6 +30,7 @@ const FAKE_DIR = join(tmpdir(), "claude-emote-fake-" + Date.now());
 const FAKE_CLAUDE_PATH = join(FAKE_DIR, "claude.js");
 const FAKE_AVATAR_PATH = join(FAKE_DIR, "avatar.js");
 const RECORD_PATH = join(FAKE_DIR, "fake-claude-record.json");
+const PIDS_PATH = join(FAKE_DIR, "fake-avatar-pids.json");
 
 beforeAll(() => {
   mkdirSync(FAKE_DIR, { recursive: true });
@@ -52,15 +53,23 @@ process.exit(exitCode);
     "utf8",
   );
 
+  // Seed the PID log so the fake avatar can append safely.
+  writeFileSync(PIDS_PATH, "[]\n", "utf8");
+
   // Fake avatar: parses --port, listens on 127.0.0.1:port, replies 200 to
   // /health and /event. Stays running until the parent (the launcher)
   // exits. We do not need to forward events to the Animator because the
   // test is checking the launcher's wiring, not the avatar server's
   // event handling.
+  //
+  // On startup, the fake avatar appends its own PID + start time to
+  // FAKE_AVATAR_PIDS_FILE so the regression test can later check that
+  // the launcher killed it.
   writeFileSync(
     FAKE_AVATAR_PATH,
     `
 const http = require("node:http");
+const fs = require("node:fs");
 const args = process.argv.slice(2);
 let port = 0;
 let instance = "test";
@@ -71,6 +80,16 @@ for (let i = 0; i < args.length; i++) {
   const mi = args[i].match(/^--instance=(.+)$/); if (mi) instance = mi[1];
 }
 if (!port) { console.error("fake avatar: --port missing"); process.exit(2); }
+
+const pidsPath = process.env.FAKE_AVATAR_PIDS_FILE;
+if (pidsPath) {
+  try {
+    const list = JSON.parse(fs.readFileSync(pidsPath, "utf8"));
+    list.push({ pid: process.pid, port, startedAt: Date.now() });
+    fs.writeFileSync(pidsPath, JSON.stringify(list, null, 2));
+  } catch {}
+}
+
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     res.statusCode = 200;
@@ -88,8 +107,7 @@ const server = http.createServer((req, res) => {
   res.end();
 });
 server.listen(port, "127.0.0.1", () => {
-  // Marker so the test can verify the fake is up before /health is polled.
-  console.log("FAKE_AVATAR_READY port=" + port + " instance=" + instance);
+  console.log("FAKE_AVATAR_READY port=" + port + " instance=" + instance + " pid=" + process.pid);
 });
 `,
     "utf8",
@@ -129,7 +147,13 @@ function runLauncher(
         ...extraEnv,
         CLAUDE_EMOTE_CLAUDE_EXE: FAKE_CLAUDE_PATH,
         CLAUDE_EMOTE_AVATAR_EXE: FAKE_AVATAR_PATH,
+        // Test mode: launcher spawns the avatar as an attached child and
+        // waits for it to exit before itself exiting. No visible windows,
+        // no detached processes.
+        CLAUDE_EMOTE_TEST_MODE: "1",
+        CLAUDE_EMOTE_DEBUG: "1",
         FAKE_CLAUDE_RECORD: RECORD_PATH,
+        FAKE_AVATAR_PIDS_FILE: PIDS_PATH,
         // Force non-Windows-Terminal path so the test does not depend on WT.
         WT_SESSION: "",
         LOCALAPPDATA: FAKE_DIR,
@@ -320,6 +344,55 @@ describe("launcher (P3 integration, isolated)", () => {
       expect(rec.argv).toContain("--version");
       // And must NOT include --plugin-dir.
       expect(rec.argv).not.toContain("--plugin-dir");
+    },
+  );
+
+  it(
+    "three consecutive launcher runs leave zero fake-avatar processes (no orphan windows)",
+    { timeout: TEST_TIMEOUT * 2 },
+    async () => {
+      // Reset the PID log so we only count avatars from this test.
+      writeFileSync(PIDS_PATH, "[]\n", "utf8");
+
+      for (let i = 0; i < 3; i++) {
+        const { code, stderr } = await runLauncher(["--resume"], {});
+        if (code !== 0) {
+          throw new Error(
+            `run #${i + 1}: launcher exited ${code}; stderr:\n${stderr}`,
+          );
+        }
+        // Each run's debug log must record test-mode avatar spawn and
+        // explicit termination.
+        expect(stderr).toMatch(/avatar exe:/);
+        expect(stderr).toMatch(/claude child closed/);
+      }
+
+      // The fake avatar wrote one PID per launch into PIDS_PATH.
+      const recorded: Array<{ pid: number; port: number; startedAt: number }> =
+        JSON.parse(readFileSync(PIDS_PATH, "utf8"));
+      expect(recorded.length).toBe(3);
+
+      // Verify each recorded PID is no longer alive. `process.kill(pid, 0)`
+      // throws ESRCH when the pid does not exist. A successful call (no
+      // throw) means the pid still exists and the launcher leaked it.
+      const survivors: number[] = [];
+      for (const entry of recorded) {
+        try {
+          process.kill(entry.pid, 0);
+          // On Windows, kill(0) succeeds for any existing process, even
+          // if we lack permission to send a signal. Treat that as "still
+          // alive".
+          survivors.push(entry.pid);
+        } catch (err) {
+          // ESRCH on POSIX = no such process. On Windows, EINVAL is also
+          // possible. Either way: the pid is gone.
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== "ESRCH" && code !== "EINVAL") {
+            throw err;
+          }
+        }
+      }
+      expect(survivors).toEqual([]);
     },
   );
 });

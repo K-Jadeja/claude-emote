@@ -191,7 +191,17 @@ async function main(): Promise<void> {
   // Terminal pane creation. Phase 8 will replace this with the proper
   // `wt -w 0 split-pane -V ...` invocation.
   let avatarProcess: ChildProcess | null = null;
-  if (process.platform === "win32") {
+  const testMode = process.env.CLAUDE_EMOTE_TEST_MODE === "1";
+  if (testMode) {
+    // Test seam: spawn the avatar directly with the current node binary,
+    // attached to this process (no detached, no shell, no wt, no start,
+    // no unref). The launcher retains the handle, kills it on shutdown,
+    // and awaits its exit before process.exit()ing so test harnesses
+    // never observe orphan fake-avatar processes or visible cmd windows.
+    avatarProcess = spawn(process.execPath, innerAvatarArgs, {
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+  } else if (process.platform === "win32") {
     const cmd = `node ${innerAvatarArgs.map((a) => (/[\s"]/.test(a) ? `"${a}"` : a)).join(" ")}`;
     const child = spawn(`start "" /B cmd /c ${cmd}`, {
       detached: true,
@@ -234,11 +244,27 @@ async function main(): Promise<void> {
 
   child.on("close", (code) => {
     dbg(`claude child closed with code ${code}`);
-    if (avatarProcess && !avatarProcess.killed) {
+    dbg(`launcher exiting with code ${code ?? 0}`);
+    // In test mode, await the avatar's actual exit so the test harness
+    // never sees an orphan avatar process.
+    if (testMode && avatarProcess && !avatarProcess.killed) {
       try { avatarProcess.kill("SIGTERM"); } catch {}
     }
-    dbg(`launcher exiting with code ${code ?? 0}`);
-    process.exit(code ?? 0);
+    if (testMode && avatarProcess) {
+      const p = avatarProcess;
+      p.once("close", () => {
+        process.exit(code ?? 0);
+      });
+      setTimeout(() => {
+        try { p.kill("SIGKILL"); } catch {}
+        process.exit(code ?? 0);
+      }, 2000).unref();
+    } else {
+      if (avatarProcess && !avatarProcess.killed) {
+        try { avatarProcess.kill("SIGTERM"); } catch {}
+      }
+      process.exit(code ?? 0);
+    }
   });
   child.on("exit", (code) => {
     dbg(`claude child exit with code ${code}`);
