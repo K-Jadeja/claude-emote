@@ -1,24 +1,21 @@
 /**
- * avatar-process-installed-usage.test.ts (P6 final repair)
+ * avatar-process-installed-usage.test.ts (P6 proof-quality repair)
  *
- * Production-path test that proves the avatar process must use the
- * PACKAGE_ROOT for the loadLayeredConfig extension argument. The test
- * spawns the compiled avatar from an unrelated temporary cwd that
- * contains NEITHER a config.json NOR an emotes/ tree.
+ * Subprocess test of installed-usage behavior. Spawns the compiled
+ * avatar from an unrelated temporary cwd and verifies:
  *
- * Step 1 of the repair (before the production fix) records the
- * failing result: the bundled hideBelow value is NOT loaded because
- * avatar-process.ts passes process.cwd() as both arguments.
+ *   - The avatar starts (READY appears).
+ *   - The READY marker reports the bundled ASCII emote dir.
+ *   - The HTTP server is reachable while the child is alive.
+ *   - The unrelated cwd remains untouched (no root config.json,
+ *     no emotes/ directory).
+ *   - The project config we planted is preserved during execution.
+ *   - SIGTERM causes clean exit with no surviving PID or temp dir.
  *
- * Step 2 of the repair (after the production fix) records the passing
- * result: hideBelow === 20 (the bundled value from
- * <PACKAGE_ROOT>/config.json), the project's local config still
- * overrides, and READY is produced with the bundled emote assets.
- *
- * The tests in this file are split by whether they require the
- * production fix. The "BEFORE-fix" describe block intentionally
- * fails when the bug is present. The "AFTER-fix" describe block
- * asserts the corrected behavior.
+ * This test does NOT claim that READY alone proves both configuration
+ * layers were loaded — see tests/unit/config-layering.test.ts for
+ * that decisive assertion, which exercises the production
+ * loadAvatarRuntimeConfig() helper directly.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -34,16 +31,13 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:net";
+import { request } from "node:http";
 import {
-  PACKAGE_ROOT,
   BUNDLED_ASCII_EMOTE_DIR,
+  PACKAGE_ROOT,
 } from "../../src/shared/project-paths.js";
 
-const AVATAR_PROCESS = join(PROJECT_ROOT(), "dist", "host", "avatar-process.js");
-
-function PROJECT_ROOT(): string {
-  return PACKAGE_ROOT;
-}
+const AVATAR_PROCESS = join(PACKAGE_ROOT, "dist", "host", "avatar-process.js");
 
 async function pickPort(): Promise<number> {
   return new Promise<number>((resolveOne) => {
@@ -52,14 +46,6 @@ async function pickPort(): Promise<number> {
       const p = (srv.address() as { port: number }).port;
       srv.close(() => resolveOne(p));
     });
-  });
-}
-
-async function awaitExit(child: ChildProcess, timeoutMs: number): Promise<number | null> {
-  if (child.exitCode !== null || child.signalCode !== null) return child.exitCode;
-  return new Promise<number | null>((resolveOne) => {
-    const t = setTimeout(() => resolveOne(null), timeoutMs);
-    child.once("exit", (code) => { clearTimeout(t); resolveOne(code); });
   });
 }
 
@@ -88,33 +74,49 @@ function stripRendererEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return clean;
 }
 
-// -------------------------------------------------------------------------
-// Installed-usage regression: spawn from an unrelated cwd that
-// contains ONLY a project config (no config.json at cwd root, no
-// emotes/ tree). The avatar process must:
-//   1. Load the bundled <PACKAGE_ROOT>/config.json (extension layer).
-//   2. Load the project <cwd>/.claude-emote/.../config.json
-//      (project layer; wins over extension).
-//   3. Resolve the bundled ASCII emote dir from PACKAGE_ROOT.
-//   4. Print READY.
-//
-// BEFORE the P6 final repair (loadLayeredConfig(process.cwd(),
-// process.cwd())), step 1 fails: the bundled config is never loaded.
-// On Windows the bundled config maps `unknown` → `sixel`, so without
-// it the avatar resolves SixelRenderer, finds no PNGs, validation
-// fails, and READY is never printed.
-// -------------------------------------------------------------------------
+function waitForReady(
+  stdoutRef: { value: string },
+  timeoutMs = 5_000,
+): Promise<{ line: string; port: number }> {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolveOne, rejectErr) => {
+    const id = setInterval(() => {
+      if (stdoutRef.value.includes("CLAUDE_EMOTE_READY")) {
+        clearInterval(id);
+        const line = stdoutRef.value.split("\n").find((l) =>
+          l.includes("CLAUDE_EMOTE_READY"),
+        ) ?? "";
+        const portMatch = line.match(/port=(\d+)/);
+        if (!portMatch) {
+          rejectErr(new Error(`READY line missing port: ${line}`));
+          return;
+        }
+        resolveOne({ line, port: Number(portMatch[1]) });
+      } else if (Date.now() > deadline) {
+        clearInterval(id);
+        rejectErr(
+          new Error(
+            `CLAUDE_EMOTE_READY not seen in ${timeoutMs}ms. stdout=\n${stdoutRef.value}`,
+          ),
+        );
+      }
+    }, 25);
+  });
+}
 
-describe("avatar-process installed usage — bundled + project layered config (P6 final)", () => {
+describe("avatar-process installed startup (P6 proof-quality)", () => {
   let unrelatedCwd: string;
+  let projectConfigPath: string;
+  let projectConfigOriginal: string;
   let child: ChildProcess | null = null;
   let stdout = "";
   let stderr = "";
 
   beforeAll(async () => {
+    // Plant ONLY a project-level config in the unrelated cwd. Do
+    // NOT plant config.json at cwd root. Do NOT plant any emotes/
+    // tree.
     unrelatedCwd = mkdtempSync(join(tmpdir(), "claude-emote-p6-installed-"));
-    // Plant ONLY a project-level config in the unrelated cwd. Do NOT
-    // plant config.json at cwd root. Do NOT plant any emotes/ tree.
     const projectConfigDir = join(
       unrelatedCwd,
       ".claude-emote",
@@ -122,15 +124,13 @@ describe("avatar-process installed usage — bundled + project layered config (P
       "claude-emote",
     );
     mkdirSync(projectConfigDir, { recursive: true });
-    writeFileSync(
-      join(projectConfigDir, "config.json"),
-      JSON.stringify({
-        terminals: [{ match: "unknown", render: "ascii" }],
-        // Distinctive holdDuration.hi — proves the project layer
-        // overrides whatever the extension layer declares.
-        holdDuration: { hi: 77, success: 1200, failure: 1200 },
-      }),
-    );
+    projectConfigPath = join(projectConfigDir, "config.json");
+    projectConfigOriginal = JSON.stringify({
+      terminals: [{ match: "unknown", render: "ascii" }],
+    });
+    writeFileSync(projectConfigPath, projectConfigOriginal, "utf8");
+
+    // Sanity: the unrelated cwd really is unrelated.
     expect(existsSync(join(unrelatedCwd, "config.json"))).toBe(false);
     expect(existsSync(join(unrelatedCwd, "emotes"))).toBe(false);
 
@@ -149,131 +149,105 @@ describe("avatar-process installed usage — bundled + project layered config (P
         cwd: unrelatedCwd,
       },
     );
-    child.stdout?.on("data", (b: Buffer) => { stdout += b.toString("utf8"); });
-    child.stderr?.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
+    child.stdout?.on("data", (b: Buffer) => {
+      stdout += b.toString("utf8");
+    });
+    child.stderr?.on("data", (b: Buffer) => {
+      stderr += b.toString("utf8");
+    });
 
-    const code = await awaitExit(child, 15_000);
-    if (child.pid !== undefined) {
-      try { process.kill(child.pid, 0); child.kill("SIGKILL"); } catch {}
-    }
-    void code;
-  }, 20_000);
-
-  afterAll(async () => {
-    if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-      await awaitExit(child, 5_000);
-    }
-    rmSync(unrelatedCwd, { recursive: true, force: true });
-  });
-
-  it("READY is produced (proves bundled + project layers were loaded)", () => {
-    expect(stdout).toContain("CLAUDE_EMOTE_READY");
-  });
-
-  it("bundled emoteDir is reported (proves bundled assets resolved from PACKAGE_ROOT)", () => {
-    expect(stdout).toContain(`emoteDir=${BUNDLED_ASCII_EMOTE_DIR}`);
-  });
-
-  it("the unrelated cwd never had config.json or emotes/", () => {
-    // Verifies the cwd was unrelated to the package.
-    expect(existsSync(join(unrelatedCwd, "config.json"))).toBe(false);
-    expect(existsSync(join(unrelatedCwd, "emotes"))).toBe(false);
-  });
-});
-
-// -------------------------------------------------------------------------
-// Project override regression: spawn the avatar from an unrelated cwd
-// containing a project config that changes exactly one setting. The
-// bundled hideBelow must still load (proving the extension layer is
-// loaded), AND the project setting must win (proving project > ext).
-// -------------------------------------------------------------------------
-
-describe("avatar-process installed usage — project override", () => {
-  let unrelatedCwd: string;
-  let child: ChildProcess | null = null;
-  let stdout = "";
-  let stderr = "";
-
-  beforeAll(async () => {
-    unrelatedCwd = mkdtempSync(join(tmpdir(), "claude-emote-p6-project-override-"));
-    // Project-level config that changes holdDuration.hi.
-    const projectConfigDir = join(
-      unrelatedCwd,
-      ".claude-emote",
-      "extensions",
-      "claude-emote",
-    );
-    mkdirSync(projectConfigDir, { recursive: true });
-    writeFileSync(
-      join(projectConfigDir, "config.json"),
-      JSON.stringify({
-        terminals: [{ match: "unknown", render: "ascii" }],
-        holdDuration: { hi: 50, success: 1200, failure: 1200 },
+    // Wait for READY (bounded ~5s) — the process is expected to
+    // stay alive.
+    const ready = await waitForReady(
+      Object.defineProperty({ value: "" }, "value", {
+        get: () => stdout,
       }),
+      5_000,
     );
-    // No config.json at cwd root and no emotes/ under unrelatedCwd.
-    expect(existsSync(join(unrelatedCwd, "config.json"))).toBe(false);
-    expect(existsSync(join(unrelatedCwd, "emotes"))).toBe(false);
-
-    const port = await pickPort();
-    child = spawn(
-      process.execPath,
-      [
-        AVATAR_PROCESS,
-        `--port=${port}`,
-        `--instance=p6-project-override`,
-        `--parentPid=${process.pid}`,
-      ],
-      {
-        env: stripRendererEnv(process.env),
-        stdio: ["ignore", "pipe", "pipe"],
-        cwd: unrelatedCwd,
-      },
-    );
-    child.stdout?.on("data", (b: Buffer) => { stdout += b.toString("utf8"); });
-    child.stderr?.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
-
-    const code = await awaitExit(child, 15_000);
-    if (child.pid !== undefined) {
-      try { process.kill(child.pid, 0); child.kill("SIGKILL"); } catch {}
-    }
-    void code;
+    // Store on the closure so the test body can read it.
+    (child as unknown as { __port: number }).__port = ready.port;
+    (child as unknown as { __readyLine: string }).__readyLine = ready.line;
   }, 20_000);
 
   afterAll(async () => {
+    // 1. Verify the project config we planted was NOT modified by the
+    //    avatar process. We compare bytes.
+    if (existsSync(projectConfigPath)) {
+      const after = readFileSync(projectConfigPath, "utf8");
+      expect(after).toBe(projectConfigOriginal);
+    }
+    // 2. Tear down the child if still alive.
     if (child && child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
-      await awaitExit(child, 5_000);
+      await new Promise<void>((r) => child!.once("exit", () => r()));
     }
+    // 3. Remove the tempdir LAST. The "no temp dir remains" test
+    //    runs inside this afterAll block after rmSync.
     rmSync(unrelatedCwd, { recursive: true, force: true });
+    expect(existsSync(unrelatedCwd)).toBe(false);
   });
 
-  it("READY is produced", () => {
-    expect(stdout).toContain("CLAUDE_EMOTE_READY");
+  function port(): number {
+    return (child as unknown as { __port: number }).__port;
+  }
+  function readyLine(): string {
+    return (child as unknown as { __readyLine: string }).__readyLine;
+  }
+
+  it("READY appears and reports the bundled ASCII emote path", () => {
+    expect(readyLine()).toContain("CLAUDE_EMOTE_READY");
+    expect(readyLine()).toContain(`emoteDir=${BUNDLED_ASCII_EMOTE_DIR}`);
   });
 
-  it("bundled emoteDir is reported (extension config + bundled assets resolved)", () => {
-    expect(stdout).toContain(`emoteDir=${BUNDLED_ASCII_EMOTE_DIR}`);
+  it("/health returns 200 while the child is still alive", async () => {
+    expect(child?.pid).toBeDefined();
+    // Verify the PID is alive BEFORE we hit /health.
+    try {
+      process.kill(child!.pid!, 0);
+    } catch {
+      throw new Error(`child ${child!.pid} exited unexpectedly`);
+    }
+    const body = await new Promise<string>((resolveOne, rejectErr) => {
+      const req = request(
+        `http://127.0.0.1:${port()}/health`,
+        { method: "GET", timeout: 2000 },
+        (res) => {
+          let buf = "";
+          res.setEncoding("utf8");
+          res.on("data", (c: string) => (buf += c));
+          res.on("end", () => resolveOne(buf));
+        },
+      );
+      req.on("error", rejectErr);
+      req.on("timeout", () => {
+        req.destroy();
+        rejectErr(new Error("timeout"));
+      });
+      req.end();
+    });
+    const parsed = JSON.parse(body);
+    expect(parsed.ok).toBe(true);
   });
 
-  it("bundled config.json still declares its own fields (proves extension layer is loaded)", () => {
-    // Sanity-check the bundled config.json on disk to make this a
-    // meaningful assertion.
-    const bundledConfig = JSON.parse(
-      readFileSync(join(PROJECT_ROOT(), "config.json"), "utf8"),
-    );
-    expect(bundledConfig.hideBelow).toBe(20);
+  it("the unrelated cwd never had a root config.json or emotes/", () => {
+    expect(existsSync(join(unrelatedCwd, "config.json"))).toBe(false);
+    expect(existsSync(join(unrelatedCwd, "emotes"))).toBe(false);
   });
 
-  it("project config override is honored (project wins over extension)", () => {
-    // Project config sets holdDuration.hi = 50. Bundled config.json
-    // does not declare holdDuration.hi explicitly so it falls through
-    // to the default (2000). After the project layer merges, the
-    // effective holdDuration.hi must be 50.
-    const bundledConfig = JSON.parse(
-      readFileSync(join(PROJECT_ROOT(), "config.json"), "utf8"),
-    );
-    expect(bundledConfig.holdDuration?.hi).not.toBe(50);
+  it("SIGTERM causes clean exit and no PID remains", async () => {
+    expect(child).not.toBeNull();
+    const pid = child!.pid!;
+    expect(pid).toBeGreaterThan(0);
+    child!.kill("SIGTERM");
+    await new Promise<void>((r) => child!.once("exit", () => r()));
+    // PID must be gone.
+    let stillAlive = false;
+    try {
+      process.kill(pid, 0);
+      stillAlive = true;
+    } catch {
+      // expected
+    }
+    expect(stillAlive).toBe(false);
   });
 });

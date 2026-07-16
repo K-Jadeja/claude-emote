@@ -49,7 +49,6 @@ import {
   resolveRendererKind,
 } from "../adapters/renderer-factory.js";
 import { StandaloneRenderHost } from "../adapters/standalone-render-host.js";
-import { loadLayeredConfig } from "../core/config.js";
 import { detectTerminalName } from "../core/terminal.js";
 import { setDebug } from "../core/log.js";
 import type { AvatarReaction } from "../claude/event-mapper.js";
@@ -60,6 +59,7 @@ import {
 import { validateEmoteDirectory } from "../shared/emote-validation.js";
 import type { RendererKind } from "../shared/emote-validation.js";
 import { PACKAGE_ROOT } from "../shared/project-paths.js";
+import { loadAvatarRuntimeConfig } from "./runtime-config.js";
 
 /**
  * Phase 6: wait for the renderer to produce a usable initial frame.
@@ -134,21 +134,11 @@ async function main(): Promise<void> {
   // emote directory. This way the bundled-path policy knows whether to
   // serve ascii or image assets.
   //
-  // loadLayeredConfig has two distinct arguments:
-  //   - PACKAGE_ROOT: location of the bundled <package>/config.json
-  //                   (lowest-priority extension layer).
-  //   - projectCwd:   the user's current working directory; the
-  //                   layered-config lookup also reads
-  //                   <cwd>/.claude-emote/extensions/claude-emote/
-  //                   config.json (highest-priority project layer).
-  // Passing the same value for both arguments breaks installed usage:
-  // the bundled config.json never gets loaded when cwd is the user's
-  // project.
+  // loadAvatarRuntimeConfig() is the single production boundary that
+  // calls loadLayeredConfig(PACKAGE_ROOT, projectCwd). Tests can
+  // call it directly to assert the exact production layering contract.
   const projectCwd = process.cwd();
-  const { config, userConfiguredTerminals } = loadLayeredConfig(
-    PACKAGE_ROOT,
-    projectCwd,
-  );
+  const { config, userConfiguredTerminals } = loadAvatarRuntimeConfig(projectCwd);
   const rendererKind: RendererKind = resolveRendererKind(
     config,
     userConfiguredTerminals,
