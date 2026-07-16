@@ -1,26 +1,59 @@
 /**
  * _isolated-config-harness.ts
  *
- * Helpers used by the harness-safety regression tests to install and
- * remove an isolated ASCII-forcing project config WITHOUT touching the
- * real project root. The live frame-output test inlines equivalent
- * logic so it can run a single child under teardown control.
+ * Test-only helper that creates an isolated ASCII-forcing project
+ * config inside a unique temp directory, and removes that directory on
+ * cleanup.
  *
- * IMPORTANT: This module never writes anywhere under process.cwd() or
- * the real project root. All file operations happen inside a tempdir
- * returned by mkdtempSync().
+ * The production-path frame-output test and the harness-safety
+ * regression tests BOTH call `createIsolatedAsciiHarness()` so they
+ * exercise the exact same implementation.
+ *
+ * Safety contract:
+ *   - The helper NEVER reads, writes, deletes, or requires absence of
+ *     any path under the real PROJECT_ROOT.
+ *   - Every operation is scoped to a unique mkdtempSync() result under
+ *     os.tmpdir().
+ *   - cleanup() is idempotent and safe to call multiple times.
+ *   - cleanup() never follows symlinks or removes files outside its
+ *     own temp directory.
  */
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-export function setupIsolatedHarnessForTest(): string {
-  const tempDir = mkdtempSync(join(tmpdir(), "claude-emote-p5-test-"));
-  const configDir = join(tempDir, ".claude-emote", "extensions", "claude-emote");
+export interface IsolatedConfigHarness {
+  /** Absolute path of the temp directory created and owned by this harness. */
+  tempDir: string;
+  /** Absolute path of the ASCII override config.json inside tempDir. */
+  configPath: string;
+  /**
+   * Remove the harness-owned temp directory. Idempotent. Safe to call
+   * from afterAll, from catch blocks in beforeAll, or multiple times
+   * from any location. Never touches anything outside tempDir.
+   */
+  cleanup(): Promise<void>;
+}
+
+/**
+ * Create an isolated ASCII-forcing project config under
+ * `${os.tmpdir()}/claude-emote-harness-<random>/.claude-emote/extensions/claude-emote/config.json`.
+ *
+ * The returned harness is the only state needed to clean up.
+ */
+export function createIsolatedAsciiHarness(): IsolatedConfigHarness {
+  const tempDir = mkdtempSync(join(tmpdir(), "claude-emote-harness-"));
+  const configDir = join(
+    tempDir,
+    ".claude-emote",
+    "extensions",
+    "claude-emote",
+  );
   mkdirSync(configDir, { recursive: true });
+  const configPath = join(configDir, "config.json");
   writeFileSync(
-    join(configDir, "config.json"),
+    configPath,
     JSON.stringify(
       { terminals: [{ match: "unknown", render: "ascii" }] },
       null,
@@ -28,10 +61,23 @@ export function setupIsolatedHarnessForTest(): string {
     ),
     "utf8",
   );
-  return tempDir;
-}
 
-export async function cleanupIsolatedHarnessForTest(tempDir: string): Promise<void> {
-  if (!tempDir) return;
-  rmSync(tempDir, { recursive: true, force: true });
+  let cleaned = false;
+  let cleanupPromise: Promise<void> | null = null;
+
+  const cleanup = (): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise;
+    cleanupPromise = (async () => {
+      if (cleaned) return;
+      cleaned = true;
+      try {
+        rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // best-effort: tempdir cleanup must never throw
+      }
+    })();
+    return cleanupPromise;
+  };
+
+  return { tempDir, configPath, cleanup };
 }

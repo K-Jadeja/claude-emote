@@ -21,6 +21,11 @@
  *     repository root. The temp directory and its `.claude-emote/...`
  *     override are deleted during teardown. The real project root is
  *     never written to.
+ *   - The config-tempdir lifecycle is delegated to the shared helper
+ *     `createIsolatedAsciiHarness()` in
+ *     `tests/integration/_isolated-config-harness.ts`. The live test
+ *     and the harness-safety regression tests both use the same
+ *     helper implementation.
  *   - The child is given the test worker's real PID via
  *     `--parentPid=${process.pid}` and `process.kill(process.pid, 0)`
  *     is asserted to succeed before spawning. The child therefore
@@ -32,14 +37,24 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve, join } from "node:path";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { request } from "node:http";
+import {
+  createIsolatedAsciiHarness,
+  type IsolatedConfigHarness,
+} from "./_isolated-config-harness.js";
 
 const PROJECT_ROOT = resolve(process.cwd());
 const AVATAR_PROCESS = join(PROJECT_ROOT, "dist", "host", "avatar-process.js");
 const ASCII_DIR = join(PROJECT_ROOT, "emotes", "ascii");
+const REAL_PROJECT_CONFIG = join(
+  PROJECT_ROOT,
+  ".claude-emote",
+  "extensions",
+  "claude-emote",
+  "config.json",
+);
 
 const ALLOWED_TALK = ["(• _ •)", "(• . •)", "(• o •)", "(• O •)"];
 const ALLOWED_READ = ["( ╭ರᴥ•́)⠉", "( ╭ರᴥ•)⠒", "( ╭ರᴥ•)⠤"];
@@ -128,48 +143,25 @@ function awaitExit(child: ChildProcess, timeoutMs: number): Promise<number | nul
   });
 }
 
-interface HarnessState {
-  tempDir: string;
+interface ChildState {
   child: ChildProcess | null;
   teardownPromise: Promise<void> | null;
 }
 
-const harness: HarnessState = {
-  tempDir: "",
+const childState: ChildState = {
   child: null,
   teardownPromise: null,
 };
 
 /**
- * Install the ASCII-forcing override inside an isolated temp directory
- * so the production code reads its config from there instead of the
- * real project root. The temp directory is created via mkdtempSync and
- * removed in teardown. No real project file is ever written.
+ * Best-effort child + harness teardown. The child lifecycle stays in
+ * this test (the test owns the child). The harness-tempdir lifecycle
+ * delegates to the shared helper.
  */
-function installIsolatedConfig(): string {
-  const tempDir = mkdtempSync(join(tmpdir(), "claude-emote-p5-"));
-  const configDir = join(tempDir, ".claude-emote", "extensions", "claude-emote");
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(
-    join(configDir, "config.json"),
-    JSON.stringify(
-      { terminals: [{ match: "unknown", render: "ascii" }] },
-      null,
-      2,
-    ),
-    "utf8",
-  );
-  return tempDir;
-}
-
-/**
- * Best-effort teardown. Idempotent and safe to call multiple times or
- * after partial setup. Only deletes directories this helper created.
- */
-async function teardown(): Promise<void> {
-  if (harness.teardownPromise) return harness.teardownPromise;
-  harness.teardownPromise = (async () => {
-    const child = harness.child;
+async function teardownAll(harness: IsolatedConfigHarness): Promise<void> {
+  if (childState.teardownPromise) return childState.teardownPromise;
+  childState.teardownPromise = (async () => {
+    const child = childState.child;
     if (child && child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
       const code = await awaitExit(child, 5_000);
@@ -182,41 +174,32 @@ async function teardown(): Promise<void> {
     if (child && child.pid !== undefined) {
       try {
         process.kill(child.pid, 0);
-        // Still alive — force kill again.
         try { child.kill("SIGKILL"); } catch { /* ignore */ }
       } catch {
         // ESRCH: child is gone. Expected.
       }
     }
-    harness.child = null;
-
-    if (harness.tempDir) {
-      try {
-        rmSync(harness.tempDir, { recursive: true, force: true });
-      } catch {
-        // ignore — tempdir cleanup is best-effort
-      }
-      harness.tempDir = "";
-    }
+    childState.child = null;
+    await harness.cleanup();
   })();
-  return harness.teardownPromise;
+  return childState.teardownPromise;
 }
 
 describe("avatar-process live frame output (P5)", () => {
   let launch: Launch;
+  let configHarness: IsolatedConfigHarness;
 
   beforeAll(async () => {
     // Verify the live parent PID is observable before spawning the child.
     try {
       process.kill(process.pid, 0);
     } catch (err) {
-      await teardown();
       throw new Error(
         `process.kill(process.pid, 0) failed: ${(err as Error).message}`,
       );
     }
 
-    harness.tempDir = installIsolatedConfig();
+    configHarness = createIsolatedAsciiHarness();
 
     // Strip renderer-affecting env vars so terminal detection returns
     // ASCII in the spawned child.
@@ -258,17 +241,15 @@ describe("avatar-process live frame output (P5)", () => {
         {
           env: cleanEnv,
           stdio: ["ignore", "pipe", "pipe"],
-          cwd: harness.tempDir,
+          cwd: configHarness.tempDir,
         },
       );
     } catch (err) {
-      await teardown();
+      await teardownAll(configHarness);
       throw err;
     }
-    harness.child = child;
+    childState.child = child;
 
-    // String accumulators. The launch object holds getter functions
-    // rather than snapshots so callers always read the current value.
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (b: Buffer) => {
@@ -278,15 +259,12 @@ describe("avatar-process live frame output (P5)", () => {
       stderr += b.toString("utf8");
     });
     child.once("exit", () => {
-      // Defensive: if the child exits unexpectedly (e.g. parent-pid
-      // watcher fires for an unrelated reason), make sure teardown runs.
-      if (harness.child === child) {
-        harness.child = null;
+      if (childState.child === child) {
+        childState.child = null;
       }
     });
 
     try {
-      // Wait for READY marker.
       await new Promise<void>((resolveOne, rejectErr) => {
         const deadline = setTimeout(
           () =>
@@ -317,7 +295,7 @@ describe("avatar-process live frame output (P5)", () => {
         });
       });
     } catch (err) {
-      await teardown();
+      await teardownAll(configHarness);
       throw err;
     }
 
@@ -331,30 +309,25 @@ describe("avatar-process live frame output (P5)", () => {
   }, 30_000);
 
   afterAll(async () => {
-    // Verify the child is still alive (parent-pid watcher must NOT have
-    // fired during the test sequence).
-    if (launch?.child && launch.child.exitCode === null && launch.child.signalCode === null) {
+    if (
+      launch?.child &&
+      launch.child.exitCode === null &&
+      launch.child.signalCode === null
+    ) {
       try {
         process.kill(launch.child.pid, 0);
-        // still alive — proceed with explicit teardown
       } catch {
-        // ESRCH — already gone, that's still fine.
+        // already gone
       }
     }
-    await teardown();
-    // Final proof: no child remains.
+    await teardownAll(configHarness);
     if (launch?.child?.pid !== undefined) {
       try {
         process.kill(launch.child.pid, 0);
-        throw new Error(
-          `avatar child ${launch.child.pid} survived teardown`,
-        );
+        throw new Error(`avatar child ${launch.child.pid} survived teardown`);
       } catch (err) {
         const e = err as NodeJS.ErrnoException;
-        if (e.code !== "ESRCH") {
-          throw err;
-        }
-        // expected — process is gone
+        if (e.code !== "ESRCH") throw err;
       }
     }
   });
@@ -450,94 +423,62 @@ describe("avatar-process live frame output (P5)", () => {
 });
 
 // -------------------------------------------------------------------------
-// Harness-safety regression tests.
-//
-// These drive the same install/cleanup primitives in isolation to prove
-// the test never touches the real project root and never destroys an
-// unrelated file.
+// Harness-safety regression tests. These drive the same shared helper
+// implementation that the live production-path test uses. They verify:
+//   1. The real project config (if any) is left untouched.
+//   2. The harness-created tempdir is fully removed on cleanup, even
+//      when it contains unrelated files.
+//   3. Cleanup is idempotent.
 // -------------------------------------------------------------------------
 
-import { setupIsolatedHarnessForTest, cleanupIsolatedHarnessForTest } from "./_isolated-config-harness.js";
-
-describe("isolated config harness safety", () => {
-  it("does not write to the real project root", () => {
-    const realProjectConfig = join(
-      PROJECT_ROOT,
-      ".claude-emote",
-      "extensions",
-      "claude-emote",
-      "config.json",
-    );
-    // The helper must use an isolated temp dir. We assert that the real
-    // project root config was NOT created during setup. (The test that
-    // runs the harness writes its own tempdir; this assertion only
-    // checks the production root was not touched.)
-    expect(existsSync(realProjectConfig)).toBe(false);
+describe("isolated config harness safety (shared helper)", () => {
+  it("creates its config inside a tempdir and removes it on cleanup", async () => {
+    const h = createIsolatedAsciiHarness();
+    expect(existsSync(h.configPath)).toBe(true);
+    expect(h.tempDir).toContain("claude-emote-harness-");
+    await h.cleanup();
+    expect(existsSync(h.tempDir)).toBe(false);
   });
 
-  it("creates and removes its own temp dir without leaving files behind", async () => {
-    const tempDir = setupIsolatedHarnessForTest();
-    const configPath = join(
-      tempDir,
-      ".claude-emote",
-      "extensions",
-      "claude-emote",
-      "config.json",
-    );
-    expect(existsSync(configPath)).toBe(true);
-    await cleanupIsolatedHarnessForTest(tempDir);
-    expect(existsSync(tempDir)).toBe(false);
+  it("cleanup is idempotent — calling twice leaves the filesystem clean", async () => {
+    const h = createIsolatedAsciiHarness();
+    await h.cleanup();
+    await h.cleanup();
+    await h.cleanup();
+    expect(existsSync(h.tempDir)).toBe(false);
   });
 
-  it("preserves a pre-existing real-project config byte-for-byte (does not write the project root)", async () => {
-    // Simulate a user/development config by creating one in a separate
-    // fake project root, then drive the helper against that root. The
-    // helper must NOT touch files in the real project root.
-    const fakeRoot = mkdtempSync(join(tmpdir(), "claude-emote-fake-"));
-    const fakeConfigDir = join(fakeRoot, ".claude-emote", "extensions", "claude-emote");
-    mkdirSync(fakeConfigDir, { recursive: true });
-    const uniqueContent = JSON.stringify(
-      { _unique: "do-not-overwrite-1234567890", terminals: [{ match: "kitty", render: "kitty" }] },
-      null,
-      2,
-    );
-    const fakeConfigPath = join(fakeConfigDir, "config.json");
-    writeFileSync(fakeConfigPath, uniqueContent, "utf8");
+  it("removes the complete tempdir including unrelated files it owns", async () => {
+    const h = createIsolatedAsciiHarness();
+    // Drop an extra unrelated file inside the harness-owned tempdir.
+    const extraFile = join(h.tempDir, "extra-unrelated-file.txt");
+    writeFileSync(extraFile, "test", "utf8");
+    expect(existsSync(extraFile)).toBe(true);
+    await h.cleanup();
+    expect(existsSync(extraFile)).toBe(false);
+    expect(existsSync(h.tempDir)).toBe(false);
+  });
 
-    // Snapshot the real project root before and after the harness runs.
-    const realProjectConfigPath = join(
-      PROJECT_ROOT,
-      ".claude-emote",
-      "extensions",
-      "claude-emote",
-      "config.json",
-    );
-    const realBefore = existsSync(realProjectConfigPath)
-      ? readFileSync(realProjectConfigPath, "utf8")
+  it("never touches the real project root config (whatever its state)", async () => {
+    // Snapshot the real project config state before running the harness.
+    const existedBefore = existsSync(REAL_PROJECT_CONFIG);
+    const bytesBefore = existedBefore
+      ? readFileSync(REAL_PROJECT_CONFIG)
       : null;
 
-    // Drive a cleanup directly against the fake root — this exercises
-    // the same code paths as the live test, in isolation.
-    // The helper is designed for its own tempdir; here we drive a
-    // mirrored install/remove against the fake root to prove the
-    // production root is untouched.
-    const tempDir = mkdtempSync(join(tmpdir(), "claude-emote-mirror-"));
-    const tempConfigDir = join(tempDir, ".claude-emote", "extensions", "claude-emote");
-    mkdirSync(tempConfigDir, { recursive: true });
-    writeFileSync(
-      join(tempConfigDir, "config.json"),
-      JSON.stringify({ terminals: [{ match: "unknown", render: "ascii" }] }),
-      "utf8",
-    );
-    rmSync(tempDir, { recursive: true, force: true });
+    const h = createIsolatedAsciiHarness();
+    expect(existsSync(h.configPath)).toBe(true);
+    await h.cleanup();
+    expect(existsSync(h.tempDir)).toBe(false);
 
-    const realAfter = existsSync(realProjectConfigPath)
-      ? readFileSync(realProjectConfigPath, "utf8")
-      : null;
-    expect(realAfter).toEqual(realBefore);
-    expect(existsSync(fakeConfigPath)).toBe(true);
-    expect(readFileSync(fakeConfigPath, "utf8")).toBe(uniqueContent);
-
-    rmSync(fakeRoot, { recursive: true, force: true });
+    // Real project config state must be unchanged.
+    const existsAfter = existsSync(REAL_PROJECT_CONFIG);
+    expect(existsAfter).toBe(existedBefore);
+    if (existedBefore) {
+      const bytesAfter = readFileSync(REAL_PROJECT_CONFIG);
+      expect(Buffer.compare(bytesBefore!, bytesAfter)).toBe(0);
+    } else {
+      expect(existsAfter).toBe(false);
+    }
   });
 });
