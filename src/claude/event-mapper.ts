@@ -9,15 +9,13 @@
  *   hooks, the launcher, or the renderer. Anything that turns a Claude
  *   event into an avatar reaction must funnel through `mapEvent()`.
  *
- * Priority rules (mirrored in docs/STATE_MACHINE.md):
- *   1. SessionEnd is destructive — the avatar process should shut down and
- *      not transition through any further states.
- *   2. Failure states (failure / compact) temporarily outrank ordinary
- *      activity, so a recent failure or compact should not be cancelled by
- *      an immediate PostToolUse that arrives during the hold window.
- *   3. The mapper is intentionally *stateless* — it just emits a target
- *      state plus, for MessageDisplay, a talk token. The Animator owns
- *      timers and cancellation.
+ * The mapper is intentionally *declarative* — it emits a target state
+ * plus, for MessageDisplay, a talk token. It does NOT own transient
+ * state, timers, or priority decisions. Those responsibilities live
+ * in src/host/avatar-state-controller.ts (Phase 7). For example, the
+ * mapper says "PostToolUseFailure → failure" but does not know that
+ * failure should be held for a duration or that it should transition
+ * to "think" afterwards; the state controller enforces those rules.
  */
 
 import type { EmoteState } from "../core/types.js";

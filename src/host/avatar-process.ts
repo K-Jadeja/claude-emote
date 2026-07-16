@@ -53,6 +53,10 @@ import { detectTerminalName } from "../core/terminal.js";
 import { setDebug } from "../core/log.js";
 import type { AvatarReaction } from "../claude/event-mapper.js";
 import {
+  createAvatarStateController,
+  type AvatarStateController,
+} from "./avatar-state-controller.js";
+import {
   resolveEmoteSelection,
   type EmoteSelection,
 } from "../shared/emote-selection.js";
@@ -216,27 +220,41 @@ async function main(): Promise<void> {
     return;
   }
 
+  // --- State controller (Phase 7) -------------------------------------------
+  //
+  // Single owner of avatar-state priority. The controller decides
+  // whether each AvatarReaction's state and talk token should reach
+  // the Animator. The avatar process itself must not call
+  // animator.transitionTo() or animator.onTalkToken() from event
+  // callbacks. The single exception is the startup transition to
+  // "idle" below, which establishes the initial visible state
+  // before the controller is constructed.
+
+  const stateController: AvatarStateController = createAvatarStateController({
+    animator: {
+      transitionTo: (state) => animator.transitionTo(state),
+      onTalkToken: (token) => animator.onTalkToken(token),
+      setHoldNextState: (state) => animator.setHoldNextState(state),
+    },
+    onShutdown: () => shutdown("session_end"),
+  });
+
   // --- HTTP server -----------------------------------------------------------
 
   let server: AvatarServer | null = null;
   let shuttingDown = false;
 
   function onEvent(reaction: AvatarReaction, _raw: unknown): void {
-    if (reaction.shutdown) {
-      shutdown("session_end");
-      return;
-    }
-    if (reaction.state) animator.transitionTo(reaction.state);
-  }
-
-  function onMessageDelta(content: string): void {
-    animator.onTalkToken(content);
+    stateController.handle(reaction);
   }
 
   async function shutdown(reason: string): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     if (debug) process.stderr.write(`[avatar-process] shutdown: ${reason}\n`);
+    try {
+      stateController.shutdown();
+    } catch {}
     try {
       animator.clearAllTimers();
     } catch {}
@@ -285,7 +303,11 @@ async function main(): Promise<void> {
       instanceId,
       port,
       onEvent,
-      onMessageDisplayDelta: onMessageDelta,
+      // Note: avatar-server.ts previously called a separate
+      // onMessageDisplayDelta callback. Phase 7 routes talk tokens
+      // through the AvatarReaction.talkToken field and the state
+      // controller decides when to forward them. AvatarStateController
+      // is the single owner of Animator.onTalkToken() calls.
     });
     process.stdout.write(
       `CLAUDE_EMOTE_READY url=${server.url} instance=${instanceId} port=${server.port} parentPid=${parentPid ?? "null"} emoteDir=${selection.directory}\n`,
