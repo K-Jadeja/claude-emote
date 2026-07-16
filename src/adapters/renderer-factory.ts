@@ -33,6 +33,19 @@ export interface RendererFactoryResult {
   setTuiHost: (host: { requestRender: () => void } | null) => void;
 }
 
+/**
+ * Phase 6: return the resolved renderer protocol WITHOUT constructing
+ * the renderer or loading frames. Used by the avatar host to choose the
+ * correct bundled emote directory BEFORE constructing the renderer.
+ */
+export function resolveRendererKind(
+  config: Config,
+  userConfiguredTerminals: Set<string> = new Set(),
+): "ascii" | "image" {
+  const resolved = resolveRenderer(config.terminals, userConfiguredTerminals);
+  return resolved.protocol === "ascii" ? "ascii" : "image";
+}
+
 /** Build a renderer instance for the given resolved protocol. */
 export function buildRenderer(resolved: ResolvedRenderer, config: Config): Renderer {
   const size = config.imageSize ?? config.size;

@@ -15,9 +15,11 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 import { request } from "node:http";
 import { createServer, type Server } from "node:net";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const PROJECT_ROOT = resolve(process.cwd());
 const AVATAR_PROCESS = join(PROJECT_ROOT, "dist", "host", "avatar-process.js");
@@ -34,16 +36,42 @@ interface AvatarLaunch {
   parentPid: string;
 }
 
+// Phase 6: the avatar process validates the resolved emote dir
+// against the resolved renderer. The bundled ASCII dir is text-only;
+// an image renderer (sixel on Windows) would reject it. This test
+// suite uses an isolated cwd with an ASCII-forcing layered config so
+// the child always picks the ASCII renderer, and the bundled ASCII
+// dir is automatically selected when no --emoteDir is supplied.
+const HARNESS_DIR = mkdtempSync(join(tmpdir(), "claude-emote-avatar-process-"));
+{
+  const configDir = join(HARNESS_DIR, ".claude-emote", "extensions", "claude-emote");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "config.json"),
+    JSON.stringify({ terminals: [{ match: "unknown", render: "ascii" }] }),
+  );
+}
+
 async function launch(args: string[]): Promise<AvatarLaunch> {
   // Strip every related env var. The avatar MUST work from CLI alone.
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of [
+    "WT_SESSION",
+    "TERM_PROGRAM",
+    "ITERM_SESSION_ID",
+    "KITTY_WINDOW_ID",
+    "WEZTERM_PANE",
+    "GHOSTTY_RESOURCES_DIR",
+    "TMUX",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ",
     "CLAUDE_EMOTE_PORT",
     "CLAUDE_EMOTE_INSTANCE_ID",
     "CLAUDE_EMOTE_EMOTE_DIR",
     "CLAUDE_EMOTE_PARENT_PID",
     "CLAUDE_EMOTE_LOG_FILE",
     "CLAUDE_EMOTE_DEBUG",
+    "CLAUDE_EMOTE_DEMO_PROTOCOL",
   ]) {
     delete env[k];
   }
@@ -54,6 +82,7 @@ async function launch(args: string[]): Promise<AvatarLaunch> {
     {
       env,
       stdio: ["ignore", "pipe", "pipe"],
+      cwd: HARNESS_DIR,
     },
   );
   let stdout = "";
@@ -289,4 +318,9 @@ describe("avatar-process CLI wiring (P4)", () => {
       expect(res.status).toBe(200);
     });
   });
+});
+
+// Cleanup the harness cwd at module teardown.
+afterAll(() => {
+  rmSync(HARNESS_DIR, { recursive: true, force: true });
 });

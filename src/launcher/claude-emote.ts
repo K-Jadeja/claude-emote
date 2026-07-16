@@ -176,15 +176,20 @@ async function main(): Promise<void> {
   const avatarExe = resolveAvatarExe();
   dbg(`avatar exe: ${avatarExe}`);
 
-  // Build the avatar child argv. We pass port/instance/emoteDir/parentPid
-  // as CLI args; the env fallback happens inside the avatar process.
+  // Build the avatar child argv. Phase 6: only forward a custom emote
+  // path when the user explicitly set CLAUDE_EMOTE_EMOTE_DIR. Otherwise
+  // the avatar process picks its bundled default that matches the
+  // resolved renderer kind.
+  const userEmoteDir = process.env.CLAUDE_EMOTE_EMOTE_DIR?.trim() || null;
   const innerAvatarArgs = [
     avatarExe,
     `--port=${port}`,
     `--instance=${instanceId}`,
-    `--emoteDir=${process.env.CLAUDE_EMOTE_EMOTE_DIR ?? join(PROJECT_ROOT, "emotes", "default")}`,
-    `--parentPid=${process.pid}`,
   ];
+  if (userEmoteDir) {
+    innerAvatarArgs.push(`--emoteDir=${userEmoteDir}`);
+  }
+  innerAvatarArgs.push(`--parentPid=${process.pid}`);
 
   // Phase 3 deliberately launches the avatar as a detached child on
   // non-Windows-Terminal hosts so the test does not depend on Windows

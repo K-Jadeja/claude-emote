@@ -37,6 +37,16 @@
 export interface AvatarProcessOptions {
   port: number;
   instanceId: string;
+  /**
+   * Resolved emote directory, or the empty string `""` to indicate that
+   * the caller did not supply a custom path via `--emoteDir` or
+   * `CLAUDE_EMOTE_EMOTE_DIR`. The avatar process interprets `""` as
+   * "automatic bundled selection" and chooses the bundled set that
+   * matches the resolved renderer kind.
+   *
+   * Phase 4 strict-validation rules are preserved: explicit
+   * `--emoteDir=<empty>` still throws `requires a non-empty value`.
+   */
   emoteDir: string;
   parentPid: number | null;
 }
@@ -238,13 +248,16 @@ export function parseAvatarProcessOptions(
     envInstance,
     () => "standalone",
   );
-  // emoteDir default is the documented project default: ${cwd}/emotes/ascii.
-  // Resolved in exactly one place, here. Tests assert this exact string.
+  // emoteDir default: an empty string means "automatic bundled
+  // selection". The avatar process resolves the actual bundled
+  // directory based on the resolved renderer kind (see
+  // src/shared/emote-selection.ts). This keeps the parser pure with
+  // respect to (argv, env) — no filesystem or process.cwd() lookup.
   const emoteDir = resolveStringField(
     "emoteDir",
     cli.get("emoteDir")!,
     envEmoteDir,
-    () => `${process.cwd()}/emotes/ascii`,
+    () => "",
   );
   const parentPid = resolveParentPidField(
     cli.get("parentPid")!,

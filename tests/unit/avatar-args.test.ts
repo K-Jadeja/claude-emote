@@ -81,10 +81,12 @@ describe("parseAvatarProcessOptions (P4)", () => {
     it("parentPid === null", () => {
       expect(parseAvatarProcessOptions([], EMPTY_ENV).parentPid).toBeNull();
     });
-    it("emoteDir === `${cwd}/emotes/ascii`", () => {
-      expect(parseAvatarProcessOptions([], EMPTY_ENV).emoteDir).toBe(
-        `${cwd}/emotes/ascii`,
-      );
+    it("emoteDir === \"\" (automatic bundled selection)", () => {
+      // Phase 6: the parser no longer picks a cwd-based default. An
+      // empty string signals "automatic bundled selection" — the
+      // avatar process resolves the actual directory from the
+      // resolved renderer kind.
+      expect(parseAvatarProcessOptions([], EMPTY_ENV).emoteDir).toBe("");
     });
   });
 

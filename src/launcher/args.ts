@@ -58,18 +58,26 @@ export function buildClaudeArgs(userArgs: string[], pluginDir: string): string[]
 export interface AvatarArgvOptions {
   port: number;
   instanceId: string;
-  emoteDir: string;
+  /**
+   * Custom emote directory. When null/undefined, no --emoteDir flag
+   * is emitted and the avatar process will pick its bundled default
+   * based on the resolved renderer kind.
+   */
+  emoteDir: string | null;
   parentPid: number;
 }
 
 export function buildAvatarArgv(opts: AvatarArgvOptions): string[] {
-  return [
+  const out: string[] = [
     AVATAR_PROCESS,
     `--port=${opts.port}`,
     `--instance=${opts.instanceId}`,
-    `--emoteDir=${opts.emoteDir}`,
-    `--parentPid=${opts.parentPid}`,
   ];
+  if (opts.emoteDir !== null && opts.emoteDir !== undefined) {
+    out.push(`--emoteDir=${opts.emoteDir}`);
+  }
+  out.push(`--parentPid=${opts.parentPid}`);
+  return out;
 }
 
 export interface WindowsTerminalPaneOptions {

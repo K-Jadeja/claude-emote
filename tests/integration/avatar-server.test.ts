@@ -14,15 +14,17 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { request } from "node:http";
+import { tmpdir } from "node:os";
 
 const AVATAR_PROCESS = join(process.cwd(), "dist", "host", "avatar-process.js");
 const FIXTURE_DIR = join(process.cwd(), "tests", "fixtures");
 
 let child: ChildProcess | null = null;
 let port = 0;
+let harnessDir: string | null = null;
 const instanceId = "test-instance-" + Date.now();
 const endpoint = `http://127.0.0.1:${port}/event`;
 
@@ -37,19 +39,50 @@ beforeAll(async () => {
     });
   });
 
+  // Phase 6: the avatar process validates that the chosen emote
+  // directory is compatible with the resolved renderer. On Windows
+  // the default `unknown` terminal maps to `sixel`, which needs
+  // Chafa and PNG frames. This test wants ASCII. We use an isolated
+  // cwd with an ASCII-forcing layered config so the terminal
+  // resolution lands on ASCII and the bundled ASCII assets are
+  // picked automatically.
+  harnessDir = mkdtempSync(join(tmpdir(), "claude-emote-avatar-server-"));
+  const configDir = join(harnessDir, ".claude-emote", "extensions", "claude-emote");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "config.json"),
+    JSON.stringify({ terminals: [{ match: "unknown", render: "ascii" }] }),
+  );
+
+  // Strip renderer-affecting env vars so terminal detection falls
+  // through to the layered config.
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of [
+    "WT_SESSION",
+    "TERM_PROGRAM",
+    "ITERM_SESSION_ID",
+    "KITTY_WINDOW_ID",
+    "WEZTERM_PANE",
+    "GHOSTTY_RESOURCES_DIR",
+    "TMUX",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ",
+    "CLAUDE_EMOTE_EMOTE_DIR",
+    "CLAUDE_EMOTE_PARENT_PID",
+    "CLAUDE_EMOTE_LOG_FILE",
+    "CLAUDE_EMOTE_DEBUG",
+    "CLAUDE_EMOTE_DEMO_PROTOCOL",
+  ]) {
+    delete env[k];
+  }
+
   child = spawn(
     process.execPath,
-    [AVATAR_PROCESS, `--port=${port}`, `--instance=${instanceId}`],
+    [AVATAR_PROCESS, `--port=${port}`, `--instance=${instanceId}`, `--parentPid=${process.pid}`],
     {
-      env: {
-        ...process.env,
-        CLAUDE_EMOTE_INSTANCE_ID: instanceId,
-        CLAUDE_EMOTE_PORT: String(port),
-        CLAUDE_EMOTE_EMOTE_DIR: join(process.cwd(), "emotes", "ascii"),
-        // Force ASCII so the test doesn't need Chafa
-        CLAUDE_EMOTE_DEMO_PROTOCOL: "ascii",
-      },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
+      cwd: harnessDir,
     },
   );
   child.stderr?.on("data", () => {}); // swallow debug logs
@@ -68,7 +101,6 @@ beforeAll(async () => {
     child!.on("error", rejectErr);
     child!.on("exit", (code) => {
       if (!buf.includes("CLAUDE_EMOTE_READY")) {
-        clearTimeout(timeout);
         rejectErr(new Error(`avatar exited ${code} before ready`));
       }
     });
@@ -79,6 +111,10 @@ afterAll(async () => {
   if (child && !child.killed) {
     child.kill("SIGTERM");
     await new Promise<void>((r) => child!.on("exit", () => r()));
+  }
+  if (harnessDir) {
+    rmSync(harnessDir, { recursive: true, force: true });
+    harnessDir = null;
   }
 });
 
