@@ -132,11 +132,22 @@ async function main(): Promise<void> {
 
   // --- Load config and resolve the renderer kind BEFORE picking the
   // emote directory. This way the bundled-path policy knows whether to
-  // serve ascii or image assets. ---
-  const extDir = process.cwd();
+  // serve ascii or image assets.
+  //
+  // loadLayeredConfig has two distinct arguments:
+  //   - PACKAGE_ROOT: location of the bundled <package>/config.json
+  //                   (lowest-priority extension layer).
+  //   - projectCwd:   the user's current working directory; the
+  //                   layered-config lookup also reads
+  //                   <cwd>/.claude-emote/extensions/claude-emote/
+  //                   config.json (highest-priority project layer).
+  // Passing the same value for both arguments breaks installed usage:
+  // the bundled config.json never gets loaded when cwd is the user's
+  // project.
+  const projectCwd = process.cwd();
   const { config, userConfiguredTerminals } = loadLayeredConfig(
-    extDir,
-    process.cwd(),
+    PACKAGE_ROOT,
+    projectCwd,
   );
   const rendererKind: RendererKind = resolveRendererKind(
     config,
