@@ -38,6 +38,21 @@
  *
  * No shell:true, no detached:true, no start, no cmd /c appear anywhere
  * in the production Windows path.
+ *
+ * Cleanup ownership:
+ *   - "test" avatar:    launcher owns the ChildProcess. Explicit
+ *                        terminate + await on Claude exit (see
+ *                        terminateOwnedAvatar()).
+ *   - "attached" avatar: launcher owns the ChildProcess. Explicit
+ *                        terminate + await on Claude exit.
+ *   - "wt" avatar:       launcher does NOT own the avatar. The wt
+ *                        process returned by spawn() is the
+ *                        Windows Terminal pane host, not the
+ *                        avatar. The avatar runs inside the pane
+ *                        under its own process. Cleanup on Claude
+ *                        exit relies on the avatar's existing
+ *                        --parentPid=<launcherPid> watcher
+ *                        (Phase 4 contract).
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -54,8 +69,65 @@ import {
   buildClaudeArgs,
   buildAvatarArgv,
   buildWindowsTerminalArgs,
+  decideAvatarLaunchMode,
   findWindowsTerminalExecutable,
 } from "./args.js";
+
+/**
+ * Best-effort, idempotent shutdown of a directly-spawned avatar
+ * ChildProcess. Used for the test-mode path and the attached
+ * fallback path. NOT used for the wt.exe pane path — the wt
+ * spawn() returned a ChildProcess for the pane host, not the
+ * avatar, so the launcher never held the avatar PID there.
+ *
+ * Steps:
+ *   1. If the handle is null or already exited, do nothing.
+ *   2. Send SIGTERM.
+ *   3. Wait for `exit` (or `close`) up to `timeoutMs`.
+ *   4. If the child is still alive, send SIGKILL.
+ *   5. Wait for the final `exit` (or `close`) up to a small grace
+ *      window.
+ *
+ * Repeated calls are safe — step 1 short-circuits.
+ *
+ * Does NOT call process.exit(); the caller forwards Claude's exit
+ * code after this returns.
+ */
+async function terminateOwnedAvatar(
+  child: ChildProcess | null,
+  timeoutMs = 2_000,
+): Promise<void> {
+  if (!child) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const tryKill = (sig: NodeJS.Signals): void => {
+    try { child.kill(sig); } catch { /* already dead */ }
+  };
+  tryKill("SIGTERM");
+  const exited = await new Promise<boolean>((resolveOne) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolveOne(true);
+      return;
+    }
+    const timer = setTimeout(() => resolveOne(false), timeoutMs);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolveOne(true);
+    });
+  });
+  if (exited) return;
+  tryKill("SIGKILL");
+  await new Promise<void>((resolveOne) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolveOne();
+      return;
+    }
+    const timer = setTimeout(() => resolveOne(), 1_000);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolveOne();
+    });
+  });
+}
 
 const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
 function dbg(msg: string): void {
@@ -205,33 +277,61 @@ async function main(): Promise<void> {
 
   const testMode = process.env.CLAUDE_EMOTE_TEST_MODE === "1";
   const platform = effectivePlatform();
-  const wtExe = testMode
+
+  // Resolve wt.exe lazily for the launch decision (test mode never
+  // looks it up). On non-Windows we still call the resolver so the
+  // dry-run path can report whether wt was found.
+  const candidateWtExe = testMode
     ? null
-    : (platform === "win32"
-        ? findWindowsTerminalExecutable(process.env, platform)
-        : null);
+    : findWindowsTerminalExecutable(process.env, platform);
+
+  const decision = decideAvatarLaunchMode(
+    process.env,
+    platform,
+    candidateWtExe,
+  );
+  dbg(`avatar launch decision: ${decision.kind} (${decision.reason})`);
 
   if (dryRun) {
-    const exe = wtExe ?? "(fallback: attached child)";
-    const args = wtExe
-      ? buildWindowsTerminalArgs({
-          title: "claude-emote",
-          workingDirectory: userCwd,
-          executable: process.execPath,
-          executableArgs: [avatarScript, ...avatarScriptArgs],
-        })
-      : [process.execPath, avatarScript, ...avatarScriptArgs];
-    process.stderr.write(`[claude-emote] dry-run wt executable: ${exe}\n`);
-    process.stderr.write(
-      `[claude-emote] dry-run argv: ${JSON.stringify(args)}\n`,
-    );
+    if (decision.kind === "windows-terminal") {
+      const args = buildWindowsTerminalArgs({
+        title: "claude-emote",
+        workingDirectory: userCwd,
+        executable: process.execPath,
+        executableArgs: [avatarScript, ...avatarScriptArgs],
+      });
+      process.stderr.write(
+        `[claude-emote] dry-run wt executable: ${candidateWtExe}\n`,
+      );
+      process.stderr.write(
+        `[claude-emote] dry-run argv: ${JSON.stringify(args)}\n`,
+      );
+    } else {
+      process.stderr.write(
+        `[claude-emote] dry-run: ${decision.reason} — falling back to attached child, no pane\n`,
+      );
+      process.stderr.write(
+        `[claude-emote] dry-run argv: ${JSON.stringify([
+          process.execPath,
+          avatarScript,
+          ...avatarScriptArgs,
+        ])}\n`,
+      );
+    }
     process.exit(0);
     return;
   }
 
-  // Avatar launch path.
+  // Avatar launch path. avatarSpawnedVia describes ownership:
+  //   - "test":     launcher owns the ChildProcess, explicit cleanup.
+  //   - "attached": launcher owns the ChildProcess, explicit cleanup.
+  //   - "wt":       launcher does NOT own the avatar PID. The
+  //                 returned spawn() handle is the wt.exe pane
+  //                 host, not the avatar. Cleanup on Claude exit
+  //                 relies on the avatar's existing
+  //                 --parentPid=<launcherPid> watcher.
   let avatarProcess: ChildProcess | null = null;
-  let avatarSpawnedVia: "wt" | "attached" | "test" = "attached";
+  let avatarSpawnedVia: "test" | "attached" | "wt" = "attached";
 
   if (testMode) {
     // Test seam: spawn the avatar directly with the current node
@@ -246,11 +346,12 @@ async function main(): Promise<void> {
       },
     );
     avatarSpawnedVia = "test";
-  } else if (wtExe) {
-    // Production Windows Terminal path: wt.exe spawns the avatar in a
-    // right-side pane. spawn() returns the wt.exe child handle, which
-    // exits quickly after pane creation. The avatar's parent-pid
-    // watcher notices when the launcher exits and shuts down.
+  } else if (decision.kind === "windows-terminal" && candidateWtExe) {
+    // Inside Windows Terminal + wt.exe resolves: spawn wt.exe -w 0
+    // split-pane ... so the avatar runs inside a Windows Terminal
+    // pane. The spawned handle is wt.exe (which exits immediately
+    // after pane creation); we store it only for diagnostics — cleanup
+    // goes through the avatar's parent-pid watcher.
     const wtArgs = buildWindowsTerminalArgs({
       title: `claude-emote (${instanceId.slice(0, 6)})`,
       workingDirectory: userCwd,
@@ -259,13 +360,16 @@ async function main(): Promise<void> {
     });
     dbg(`wt argv: ${JSON.stringify(wtArgs)}`);
     // If the resolved wt executable is a Node script (test seam only
-    // — real wt.exe is always a real .exe on Windows), route it through
-    // the current node binary. This keeps the production spawn() shape
-    // ({ shell: false, detached: false, stdio: "ignore", windowsHide: true
-    // }) intact for real users while letting tests use a script shim.
-    const isNodeScript = /\.(cjs|js|mjs)$/i.test(wtExe);
-    const spawnExe = isNodeScript ? process.execPath : wtExe;
-    const spawnArgs = isNodeScript ? [wtExe, ...wtArgs] : wtArgs;
+    // — real wt.exe is always a real .exe on Windows), route it
+    // through the current node binary. This keeps the production
+    // spawn() shape ({ shell: false, detached: false, stdio:
+    // "ignore", windowsHide: true }) intact for real users while
+    // letting tests use a script shim.
+    const isNodeScript = /\.(cjs|js|mjs)$/i.test(candidateWtExe);
+    const spawnExe = isNodeScript ? process.execPath : candidateWtExe;
+    const spawnArgs = isNodeScript
+      ? [candidateWtExe, ...wtArgs]
+      : wtArgs;
     avatarProcess = spawn(spawnExe, spawnArgs, {
       shell: false,
       detached: false,
@@ -274,14 +378,18 @@ async function main(): Promise<void> {
     });
     avatarSpawnedVia = "wt";
   } else {
-    // Fallback outside Windows Terminal (or wt.exe not found):
-    // spawn the avatar as an attached child of the launcher. This may
-    // share the terminal output but must not open repeated CMD windows
-    // or create orphans.
-    console.error(
-      "[claude-emote] NOTE: Windows Terminal (wt.exe) not found. " +
-        "Spawning avatar as an attached child of the launcher.",
-    );
+    // Outside Windows Terminal OR wt.exe not found OR not on
+    // Windows: launch as an attached child of the launcher. The
+    // launcher owns this handle and explicitly cleans it up on
+    // Claude exit via terminateOwnedAvatar().
+    if (decision.reason !== "not-windows") {
+      // Only print the warning when the user *could* have been in a
+      // WT pane — pure-POSIX hosts aren't expected to provide wt.
+      console.error(
+        `[claude-emote] NOTE: not running inside Windows Terminal ` +
+          `(${decision.reason}); spawning avatar as an attached child.`,
+      );
+    }
     avatarProcess = spawn(
       process.execPath,
       [avatarScript, ...avatarScriptArgs],
@@ -291,7 +399,7 @@ async function main(): Promise<void> {
     );
     avatarSpawnedVia = "attached";
   }
-  dbg(`avatar launch: ${avatarSpawnedVia}`);
+  dbg(`avatar launched via: ${avatarSpawnedVia}`);
 
   const health = await waitForHealth(endpoint);
   if (!health) {
@@ -318,41 +426,35 @@ async function main(): Promise<void> {
     env: childEnv,
   });
 
-  child.on("close", (code) => {
+  child.on("close", async (code) => {
     dbg(`claude child closed with code ${code}`);
-    dbg(`launcher exiting with code ${code ?? 0}`);
-    if (testMode && avatarProcess && !avatarProcess.killed) {
-      try { avatarProcess.kill("SIGTERM"); } catch {}
+    const finalCode = code ?? 0;
+    // Cleanup the avatar ONLY when we own its ChildProcess handle.
+    // The wt.exe pane path does NOT — the spawned handle is wt, not
+    // the avatar, and the avatar's --parentPid watcher reaps the
+    // avatar when this process exits (~1.5s after Claude closes).
+    if (avatarSpawnedVia !== "wt") {
+      await terminateOwnedAvatar(avatarProcess);
     }
-    if (testMode && avatarProcess) {
-      const p = avatarProcess;
-      p.once("close", () => {
-        process.exit(code ?? 0);
-      });
-      setTimeout(() => {
-        try { p.kill("SIGKILL"); } catch {}
-        process.exit(code ?? 0);
-      }, 2000).unref();
-    } else {
-      // For the wt.exe path and the attached fallback the avatar
-      // already receives --parentPid=<launcher> and watches this
-      // process. Exiting here will fire its parent-pid watcher at
-      // the next 1s tick, then shutdown() at +500ms.
-      process.exit(code ?? 0);
-    }
+    process.exit(finalCode);
   });
   child.on("exit", (code) => {
     dbg(`claude child exit with code ${code}`);
   });
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => {
+    process.on(sig, async () => {
       try {
         child.kill(sig);
       } catch {}
-      if (testMode && avatarProcess && !avatarProcess.killed) {
-        try { avatarProcess.kill("SIGTERM"); } catch {}
+      // Forward the signal to the Claude child already happened
+      // above. Now also forward to a directly-owned avatar (test
+      // mode or attached fallback) — the wt pane path relies on the
+      // parent-pid watcher, not on us killing the avatar here.
+      if (avatarSpawnedVia !== "wt") {
+        await terminateOwnedAvatar(avatarProcess);
       }
+      process.exit(0);
     });
   }
 }

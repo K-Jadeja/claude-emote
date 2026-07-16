@@ -267,6 +267,10 @@ function runLauncher(
       // Make the launcher run on Windows + wt.exe present even if the
       // host is not Windows, so this suite works on every CI machine.
       CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+      // Default WT_SESSION to a non-empty fake value so the WT branch
+      // is exercised. Tests that want the attached-fallback path
+      // pass `wtSession: ""` (or call runLauncherAttached()).
+      WT_SESSION: extraEnv.wtSession ?? "phase8-fake-session-abcdef",
       // Test mode is deliberately NOT set: this suite must exercise the
       // wt.exe branch.
       CLAUDE_EMOTE_DEBUG: "1",
@@ -276,9 +280,11 @@ function runLauncher(
       FAKE_CLAUDE_EXIT_CODE: extraEnv.FAKE_CLAUDE_EXIT_CODE || "0",
     };
     // Clear variables that could fool the WT detection.
-    delete env.WT_SESSION;
     delete env.LOCALAPPDATA;
     delete env.CLAUDE_EMOTE_TEST_MODE;
+    if (extraEnv.wtSession === "") {
+      delete env.WT_SESSION;
+    }
 
     const child: ChildProcess = spawn(NODE, [LAUNCHER, ...args], {
       env,
@@ -454,8 +460,8 @@ describe("launcher dry-run (P8 diagnostic mode)", () => {
         CLAUDE_EMOTE_TEST_PLATFORM: "win32",
         CLAUDE_EMOTE_DRY_RUN: "1",
         FAKE_WT_RECORD: WT_RECORD,
+        WT_SESSION: "phase8-fake-session-abcdef",
       };
-      delete env.WT_SESSION;
       delete env.LOCALAPPDATA;
       delete env.CLAUDE_EMOTE_TEST_MODE;
       const res = await new Promise<{ code: number; stderr: string }>((r, j) => {
@@ -516,7 +522,163 @@ describe("launcher in test mode does NOT call buildWindowsTerminalArgs (P8 isola
       expect(res.code).toBe(0);
       expect(existsSync(WT_RECORD)).toBe(false);
       // Test mode is reported in debug logs.
-      expect(res.stderr).toMatch(/avatar launch: test/);
+      expect(res.stderr).toMatch(/avatar launched via: test/);
+    },
+  );
+});
+
+/**
+ * Attached-fallback suite.
+ *
+ * Run on Windows (via CLAUDE_EMOTE_TEST_PLATFORM=win32) but WITHOUT
+ * WT_SESSION. The launcher must:
+ *   - never invoke wt.exe
+ *   - spawn the avatar directly as an attached child
+ *   - wait for /health, then start Claude
+ *   - on Claude exit, send SIGTERM to the avatar and await its exit
+ *   - forward Claude's exit code
+ *   - leave no process behind
+ */
+describe("launcher attached fallback (WT_SESSION absent)", () => {
+  beforeAll(() => {
+    writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+  });
+
+  it(
+    "WT_SESSION absent → fake wt is never invoked; fake avatar is invoked directly",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      // Clear any leftover record from the WT suite.
+      try { rmSync(WT_RECORD, { force: true }); } catch {}
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        CLAUDE_EMOTE_CLAUDE_EXE: FAKE_CLAUDE_PATH,
+        CLAUDE_EMOTE_AVATAR_EXE: FAKE_AVATAR_PATH,
+        CLAUDE_EMOTE_WT_EXE: FAKE_WT_PATH,
+        CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+        CLAUDE_EMOTE_DEBUG: "1",
+        FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
+        FAKE_WT_RECORD: WT_RECORD,
+        FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
+        FAKE_CLAUDE_EXIT_CODE: "0",
+        // Deliberately NO WT_SESSION.
+      };
+      delete env.WT_SESSION;
+      delete env.LOCALAPPDATA;
+      delete env.CLAUDE_EMOTE_TEST_MODE;
+      const res = await new Promise<{ code: number; stderr: string }>(
+        (r, j) => {
+          const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stderr = "";
+          child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+          child.on("close", (code) => r({ code: code ?? 0, stderr }));
+          child.on("error", j);
+        },
+      );
+      expect(res.code).toBe(0);
+      // WT branch MUST NOT run.
+      expect(existsSync(WT_RECORD)).toBe(false);
+      // The attached branch DID spawn the avatar.
+      const recorded = JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
+      expect(recorded.length).toBeGreaterThan(0);
+      // Debug log confirms the launch decision + path.
+      expect(res.stderr).toMatch(/attached/);
+      // Claude was started with --plugin-dir and the endpoint env.
+      const claude = readClaudeRecord();
+      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/event$/);
+      expect(claude.argv).toContain("--plugin-dir");
+    },
+  );
+
+  it(
+    "attached avatar receives SIGTERM when Claude exits (no orphan process)",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      try { rmSync(WT_RECORD, { force: true }); } catch {}
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        CLAUDE_EMOTE_CLAUDE_EXE: FAKE_CLAUDE_PATH,
+        CLAUDE_EMOTE_AVATAR_EXE: FAKE_AVATAR_PATH,
+        CLAUDE_EMOTE_WT_EXE: FAKE_WT_PATH,
+        CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+        CLAUDE_EMOTE_DEBUG: "1",
+        FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
+        FAKE_WT_RECORD: WT_RECORD,
+        FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
+        FAKE_CLAUDE_EXIT_CODE: "0",
+      };
+      delete env.WT_SESSION;
+      delete env.LOCALAPPDATA;
+      delete env.CLAUDE_EMOTE_TEST_MODE;
+      // Reset the avatar PID log for this test only.
+      writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+      const res = await new Promise<{ code: number; stderr: string }>(
+        (r, j) => {
+          const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stderr = "";
+          child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+          child.on("close", (code) => r({ code: code ?? 0, stderr }));
+          child.on("error", j);
+        },
+      );
+      expect(res.code).toBe(0);
+      const recorded = JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
+      expect(recorded.length).toBe(1);
+      const avatarPid = recorded[0].pid;
+      // No orphan PID remains after Claude exits and the launcher
+      // forwards SIGTERM to the attached avatar.
+      try {
+        process.kill(avatarPid, 0);
+        throw new Error(
+          `attached avatar ${avatarPid} survived Claude exit`,
+        );
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code !== "ESRCH" && e.code !== "EINVAL") throw err;
+      }
+    },
+  );
+
+  it(
+    "Claude exit code is preserved (also in attached fallback)",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      try { rmSync(WT_RECORD, { force: true }); } catch {}
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        CLAUDE_EMOTE_CLAUDE_EXE: FAKE_CLAUDE_PATH,
+        CLAUDE_EMOTE_AVATAR_EXE: FAKE_AVATAR_PATH,
+        CLAUDE_EMOTE_WT_EXE: FAKE_WT_PATH,
+        CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+        FAUDE_EMOTE_DEBUG: "1",
+        FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
+        FAKE_WT_RECORD: WT_RECORD,
+        FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
+        FAKE_CLAUDE_EXIT_CODE: "9",
+      };
+      delete env.WT_SESSION;
+      delete env.LOCALAPPDATA;
+      delete env.CLAUDE_EMOTE_TEST_MODE;
+      writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+      const res = await new Promise<{ code: number; stderr: string }>(
+        (r, j) => {
+          const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stderr = "";
+          child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+          child.on("close", (code) => r({ code: code ?? 0, stderr }));
+          child.on("error", j);
+        },
+      );
+      expect(res.code).toBe(9);
     },
   );
 });

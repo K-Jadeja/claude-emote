@@ -207,6 +207,57 @@ export function findWindowsTerminalExecutable(
   return onPath;
 }
 
+/**
+ * Pure decision: where the avatar pane should be launched.
+ *
+ * The Windows Terminal pane branch is ONLY available when ALL of:
+ *   - platform === "win32"
+ *   - process.env.WT_SESSION is a non-empty (non-whitespace) string.
+ *     This proves the launcher itself is running inside Windows
+ *     Terminal. Spawning wt.exe from CMD / PowerShell / VS Code
+ *     / etc. would otherwise target an unrelated window.
+ *   - the wt executable resolves to an existing file (see
+ *     findWindowsTerminalExecutable).
+ *
+ * In every other case the launcher falls back to attaching the
+ * avatar as a normal child of itself.
+ *
+ * Pure: no filesystem side effects, no `process.platform` global
+ * reads, no environment mutation. Pass `env` and `platform`
+ * explicitly so the same call is exercised by unit tests.
+ *
+ * "test-mode" is intentionally NOT a parameter here. The launcher
+ * short-circuits to test mode before calling this helper.
+ */
+export interface AvatarLaunchDecision {
+  kind: "windows-terminal" | "attached";
+  reason:
+    | "inside-windows-terminal"
+    | "not-windows"
+    | "not-inside-windows-terminal"
+    | "wt-not-found";
+}
+
+export function decideAvatarLaunchMode(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  wtExecutable: string | null,
+): AvatarLaunchDecision {
+  if (platform !== "win32") {
+    return { kind: "attached", reason: "not-windows" };
+  }
+  const sessionRaw = env.WT_SESSION;
+  const sessionIsSet =
+    typeof sessionRaw === "string" && sessionRaw.trim() !== "";
+  if (!sessionIsSet) {
+    return { kind: "attached", reason: "not-inside-windows-terminal" };
+  }
+  if (wtExecutable === null) {
+    return { kind: "attached", reason: "wt-not-found" };
+  }
+  return { kind: "windows-terminal", reason: "inside-windows-terminal" };
+}
+
 function findExecutableOnPath(
   name: string,
   platform: NodeJS.Platform,
@@ -224,19 +275,4 @@ function findExecutableOnPath(
     }
   }
   return null;
-}
-
-/**
- * Return the substring of `haystack` that contains the first occurrence
- * of each of `flags` individually if present. Used by capability probes
- * that want to verify each flag is recognised independently (not just
- * assume lowercase -f / uppercase -F behaviour from one another).
- */
-export function probeFlagsInHelpText(
-  helpText: string,
-  flags: readonly string[],
-): Record<string, boolean> {
-  const out: Record<string, boolean> = {};
-  for (const f of flags) out[f] = helpText.includes(f);
-  return out;
 }

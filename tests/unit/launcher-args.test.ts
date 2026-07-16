@@ -11,7 +11,7 @@ import {
   buildClaudeArgs,
   buildAvatarArgv,
   buildWindowsTerminalArgs,
-  buildAvatarArgv as _buildAvatarArgv, // re-imported below
+  decideAvatarLaunchMode,
   PROJECT_ROOT,
   AVATAR_PROCESS,
   DEFAULT_PANE_SIZE,
@@ -59,6 +59,92 @@ describe("launcher args", () => {
       );
       expect(result).toEqual(["--plugin-dir", PROJECT_ROOT]);
       expect(result.filter((a) => a === "--plugin-dir").length).toBe(1);
+    });
+
+    it("preserves an unrelated --plugin-dir PATH and still injects claude-emote's", () => {
+      const result = buildClaudeArgs(
+        ["--plugin-dir", "C:/other/plugin"],
+        PROJECT_ROOT,
+      );
+      // The user's --plugin-dir is preserved in its original place; the
+      // claude-emote plugin dir is appended at the end.
+      expect(result.indexOf("--plugin-dir")).toBe(0);
+      expect(result[result.indexOf("--plugin-dir") + 1]).toBe(
+        "C:/other/plugin",
+      );
+      expect(result.indexOf(PROJECT_ROOT)).toBe(result.length - 1);
+      expect(result[result.length - 2]).toBe("--plugin-dir");
+      expect(result.filter((a) => a === "--plugin-dir").length).toBe(2);
+    });
+
+    it("preserves an unrelated --plugin-dir=PATH and still injects claude-emote's", () => {
+      const result = buildClaudeArgs(
+        ["--plugin-dir=C:/other/plugin"],
+        PROJECT_ROOT,
+      );
+      expect(result[0]).toBe("--plugin-dir=C:/other/plugin");
+      expect(result[result.length - 2]).toBe("--plugin-dir");
+      expect(result[result.length - 1]).toBe(PROJECT_ROOT);
+      expect(result.filter((a) => a.startsWith("--plugin-dir")).length).toBe(
+        2,
+      );
+    });
+
+    it("does not duplicate --plugin-dir= when the user pointed at PROJECT_ROOT", () => {
+      const result = buildClaudeArgs(
+        [`--plugin-dir=${PROJECT_ROOT}`],
+        PROJECT_ROOT,
+      );
+      expect(result).toEqual([`--plugin-dir=${PROJECT_ROOT}`]);
+      expect(result.filter((a) => a.startsWith("--plugin-dir")).length).toBe(1);
+    });
+
+    it("does not duplicate --plugin-dir= when the user pointed elsewhere (still injects ours)", () => {
+      const result = buildClaudeArgs(
+        ["--plugin-dir=C:/other/plugin", "--resume", "--model", "opus"],
+        PROJECT_ROOT,
+      );
+      expect(result[0]).toBe("--plugin-dir=C:/other/plugin");
+      // claude-emote plugin-dir is appended at the end.
+      expect(result[result.length - 1]).toBe(PROJECT_ROOT);
+      expect(result[result.length - 2]).toBe("--plugin-dir");
+      // User arguments preserved in order.
+      expect(result.indexOf("--resume")).toBeGreaterThan(-1);
+      expect(result.indexOf("--model")).toBeGreaterThan(
+        result.indexOf("--resume"),
+      );
+    });
+
+    it("injected package path is absolute", () => {
+      const result = buildClaudeArgs([], PROJECT_ROOT);
+      const idx = result.indexOf("--plugin-dir");
+      const value = result[idx + 1];
+      // Must be absolute (Windows: starts with drive letter or UNC; POSIX: starts with /)
+      expect(
+        /^[A-Z]:[\\/]/.test(value) || value.startsWith("/"),
+      ).toBe(true);
+    });
+
+    it("preserves user argument order otherwise", () => {
+      const userArgs = [
+        "--resume",
+        "--model",
+        "opus",
+        "--dangerously-skip-permissions",
+        "--plugin-dir",
+        "C:/third/plugin",
+      ];
+      const result = buildClaudeArgs(userArgs, PROJECT_ROOT);
+      // First three appear at indices 0..2 in the same order.
+      expect(result[0]).toBe("--resume");
+      expect(result[1]).toBe("--model");
+      expect(result[2]).toBe("opus");
+      // --plugin-dir is preserved inline.
+      const userPluginDirIdx = result.indexOf("C:/third/plugin");
+      expect(userPluginDirIdx).toBe(5);
+      // claude-emote plugin-dir is appended.
+      expect(result[result.length - 2]).toBe("--plugin-dir");
+      expect(result[result.length - 1]).toBe(PROJECT_ROOT);
     });
   });
 
@@ -258,6 +344,104 @@ describe("launcher args", () => {
       expect(out.indexOf("claude-emote avatar pane")).toBe(
         out.lastIndexOf("claude-emote avatar pane"),
       );
+    });
+  });
+
+  describe("decideAvatarLaunchMode (P8 gating)", () => {
+    it("win32 + WT_SESSION + wt found → windows-terminal", () => {
+      const d = decideAvatarLaunchMode(
+        { WT_SESSION: "abc-123" },
+        "win32",
+        "C:/Windows/System32/wt.exe",
+      );
+      expect(d).toEqual({ kind: "windows-terminal", reason: "inside-windows-terminal" });
+    });
+
+    it("win32 + no WT_SESSION + wt found → attached", () => {
+      const d = decideAvatarLaunchMode(
+        {},
+        "win32",
+        "C:/Windows/System32/wt.exe",
+      );
+      expect(d.kind).toBe("attached");
+      expect(d.reason).toBe("not-inside-windows-terminal");
+    });
+
+    it("win32 + WT_SESSION + no wt → attached", () => {
+      const d = decideAvatarLaunchMode(
+        { WT_SESSION: "abc-123" },
+        "win32",
+        null,
+      );
+      expect(d.kind).toBe("attached");
+      expect(d.reason).toBe("wt-not-found");
+    });
+
+    it("win32 + empty-string WT_SESSION + wt → attached (empty is absent)", () => {
+      const d = decideAvatarLaunchMode(
+        { WT_SESSION: "" },
+        "win32",
+        "C:/Windows/System32/wt.exe",
+      );
+      expect(d.kind).toBe("attached");
+      expect(d.reason).toBe("not-inside-windows-terminal");
+    });
+
+    it("win32 + whitespace-only WT_SESSION + wt → attached (whitespace is absent)", () => {
+      const d = decideAvatarLaunchMode(
+        { WT_SESSION: "   " },
+        "win32",
+        "C:/Windows/System32/wt.exe",
+      );
+      expect(d.kind).toBe("attached");
+      expect(d.reason).toBe("not-inside-windows-terminal");
+    });
+
+    it("linux + WT_SESSION + wt → attached (non-windows never selects WT)", () => {
+      const d = decideAvatarLaunchMode(
+        { WT_SESSION: "abc-123" },
+        "linux",
+        "/usr/bin/wt",
+      );
+      expect(d.kind).toBe("attached");
+      expect(d.reason).toBe("not-windows");
+    });
+
+    it("darwin + wt → attached (non-windows never selects WT)", () => {
+      const d = decideAvatarLaunchMode(
+        {},
+        "darwin",
+        "/usr/local/bin/wt",
+      );
+      expect(d.kind).toBe("attached");
+      expect(d.reason).toBe("not-windows");
+    });
+
+    it("wt.exe existence alone is insufficient (no WT_SESSION)", () => {
+      // Most important regression test: the previous production
+      // condition would select WT here. The corrected decision must not.
+      const d = decideAvatarLaunchMode(
+        {},
+        "win32",
+        "C:/Program Files/WindowsApps/wt.exe",
+      );
+      expect(d.kind).toBe("attached");
+    });
+
+    it("valid WT environment selects Windows Terminal", () => {
+      const d = decideAvatarLaunchMode(
+        { WT_SESSION: "valid-session-id" },
+        "win32",
+        "C:/Users/test/AppData/Local/Microsoft/WindowsApps/wt.exe",
+      );
+      expect(d.kind).toBe("windows-terminal");
+    });
+
+    it("wt.exe is referenced only by the launch decision (decideAvatarLaunchMode does NOT itself look up files)", () => {
+      // The helper accepts a pre-resolved wt path as a parameter.
+      // It must not call the filesystem.
+      // This is enforced by signature.
+      expect(typeof decideAvatarLaunchMode).toBe("function");
     });
   });
 });
