@@ -16,6 +16,13 @@
  *     requestRender() more than once per logical change).
  *   - It hides the cursor while active and restores it on shutdown.
  *
+ * Live-frame contract (P5):
+ *   When a renderer is attached via attachFrameSource(), the host MUST
+ *   pull the newest frame from that getter at every actual redraw. It
+ *   must not snapshot the frame once at attach time, because the
+ *   renderer changes its `currentFrame` between requestRender() and the
+ *   debounced redraw.
+ *
  * Layout strategy for ASCII text frames:
  *   1. Cursor home (pane row 1, col 1).
  *   2. Erase each old frame line (so old text is overwritten).
@@ -47,11 +54,18 @@ export interface StandaloneRenderHostOptions {
 }
 
 export class StandaloneRenderHost {
+  /**
+   * Persistent frame getter. When non-null, the host pulls the renderer
+   * frame at every actual redraw. When null, the host falls back to
+   * `currentFrame` for backward compatibility with demos / unit tests.
+   */
+  private frameSource: (() => RenderedFrame | null) | null = null;
   private currentFrame: RenderedFrame | null = null;
   private pendingTimer: ReturnType<typeof setTimeout> | null = null;
   private scheduled = false;
   private lastTextRows = 0;
   private started = false;
+  private stopped = false;
   private readonly silent: boolean;
   private readonly sink?: (frame: RenderedFrame) => void;
 
@@ -66,54 +80,86 @@ export class StandaloneRenderHost {
    * next macrotask.
    */
   requestRender(): void {
+    if (this.stopped) return;
     if (this.scheduled) return;
     this.scheduled = true;
     if (this.pendingTimer) return;
     this.pendingTimer = setTimeout(() => {
       this.pendingTimer = null;
+      // A shutdown between schedule and fire must not draw.
+      if (this.stopped) {
+        this.scheduled = false;
+        return;
+      }
       this.scheduled = false;
       this.redrawNow();
     }, REDRAW_DEBOUNCE_MS);
   }
 
+  /**
+   * Resolve the current frame from the live source if attached, otherwise
+   * fall back to the manually-set cached frame. Called only inside
+   * redrawNow() so the value is sampled at redraw time, not at schedule
+   * time.
+   */
+  private resolveFrame(): RenderedFrame | null {
+    if (this.frameSource !== null) {
+      return this.frameSource();
+    }
+    return this.currentFrame;
+  }
+
   /** Force a synchronous redraw without debouncing. */
   redrawNow(): void {
-    if (!this.currentFrame) return;
+    if (this.stopped) return;
+    const frame = this.resolveFrame();
+    if (!frame) return;
+    // Re-check stopped after pulling frame — the getter might have caused
+    // shutdown as a side effect.
+    if (this.stopped) return;
     if (this.silent) {
-      this.sink?.(this.currentFrame);
+      this.sink?.(frame);
       return;
     }
 
     cursorHome();
-    if (this.currentFrame.kind === "text") {
+    if (frame.kind === "text") {
       eraseLines(this.lastTextRows);
-      for (const line of this.currentFrame.lines) {
+      for (const line of frame.lines) {
         writeRaw(line + "\r\n");
       }
-      this.lastTextRows = this.currentFrame.lines.length;
-    } else if (this.currentFrame.kind === "image") {
+      this.lastTextRows = frame.lines.length;
+    } else if (frame.kind === "image") {
       // For images we don't track textual rows; the renderer manages its
       // own layout through cursor save/restore. Just emit the payload.
-      writeRaw(this.currentFrame.sequence);
-    } else if (this.currentFrame.kind === "placeholder") {
+      writeRaw(frame.sequence);
+    } else if (frame.kind === "placeholder") {
       eraseLines(this.lastTextRows);
-      for (const line of this.currentFrame.lines) {
+      for (const line of frame.lines) {
         writeRaw(line + "\r\n");
       }
-      this.lastTextRows = this.currentFrame.lines.length;
+      this.lastTextRows = frame.lines.length;
     }
   }
 
-  /** Bind the renderer so subsequent frames route through this host. */
+  /**
+   * Bind the renderer's current-frame getter. Subsequent requestRender()
+   * calls (which originate inside the renderer's `show*` methods) pull
+   * `getFrame()` at redraw time. The getter is retained, NOT snapshotted.
+   * Attaching happens once in production; callers must not reattach for
+   * every state.
+   */
   attachFrameSource(getFrame: () => RenderedFrame | null): void {
+    this.frameSource = getFrame;
     this.start();
-    // Pull the current frame so debounced renders have something to draw.
-    this.currentFrame = getFrame();
-    // Also schedule an immediate draw so the pane is populated right away.
     this.requestRender();
   }
 
-  /** Update the cached frame and trigger a debounced redraw. */
+  /**
+   * Update the cached frame and trigger a debounced redraw. Used by demos
+   * and isolated unit tests that do not attach a live renderer. Production
+   * uses attachFrameSource() instead.
+   */
   setCurrentFrame(frame: RenderedFrame | null): void {
     this.currentFrame = frame;
     this.requestRender();
@@ -127,11 +173,15 @@ export class StandaloneRenderHost {
 
   /** Restore the terminal to a sane state. Idempotent. */
   shutdown(): void {
+    if (this.stopped) return;
+    this.stopped = true;
     if (this.pendingTimer) {
       clearTimeout(this.pendingTimer);
       this.pendingTimer = null;
     }
     this.scheduled = false;
+    this.frameSource = null;
+    this.currentFrame = null;
     if (!this.silent) {
       cursorHome();
       writeRaw("\r\n");
@@ -139,8 +189,8 @@ export class StandaloneRenderHost {
     }
   }
 
-  /** Test hook: returns the cached frame without redrawing. */
+  /** Test hook: returns the frame the host WOULD draw right now. */
   peekFrame(): RenderedFrame | null {
-    return this.currentFrame;
+    return this.frameSource !== null ? this.frameSource() : this.currentFrame;
   }
 }

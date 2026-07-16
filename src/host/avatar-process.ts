@@ -95,6 +95,11 @@ async function main(): Promise<void> {
   const host = new StandaloneRenderHost();
   host.start();
   setTuiHost(host);
+  // P5: connect the renderer's current-frame getter to the host. The host
+  // pulls the latest frame at every redraw, so renderer-driven
+  // requestRender() calls actually draw the newest frame instead of a
+  // one-time snapshot.
+  host.attachFrameSource(() => renderer.getRenderedFrame());
 
   const animator = new Animator(config, renderer);
 
