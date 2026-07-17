@@ -60,7 +60,6 @@ import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { request } from "node:http";
 
 import {
   PROJECT_ROOT,
@@ -72,200 +71,15 @@ import {
   decideAvatarLaunchMode,
   findWindowsTerminalExecutable,
 } from "./args.js";
+import {
+  waitForOwnedAvatarStartup,
+  waitForEndpointHealth,
+  waitForSpawnOutcome,
+  terminateOwnedAvatar,
+} from "./startup.js";
 
-/**
- * Best-effort, idempotent shutdown of a directly-spawned avatar
- * ChildProcess. Used for the test-mode path and the attached
- * fallback path. NOT used for the wt.exe pane path — the wt
- * spawn() returned a ChildProcess for the pane host, not the
- * avatar, so the launcher never held the avatar PID there.
- *
- * Steps:
- *   1. If the handle is null or already exited, do nothing.
- *   2. Send SIGTERM.
- *   3. Wait for `exit` (or `close`) up to `timeoutMs`.
- *   4. If the child is still alive, send SIGKILL.
- *   5. Wait for the final `exit` (or `close`) up to a small grace
- *      window.
- *
- * Repeated calls are safe — step 1 short-circuits.
- *
- * Does NOT call process.exit(); the caller forwards Claude's exit
- * code after this returns.
- */
-async function terminateOwnedAvatar(
-  child: ChildProcess | null,
-  timeoutMs = 2_000,
-): Promise<void> {
-  if (!child) return;
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  const tryKill = (sig: NodeJS.Signals): void => {
-    try { child.kill(sig); } catch { /* already dead */ }
-  };
-  tryKill("SIGTERM");
-  const exited = await new Promise<boolean>((resolveOne) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolveOne(true);
-      return;
-    }
-    const timer = setTimeout(() => resolveOne(false), timeoutMs);
-    child.once("exit", () => {
-      clearTimeout(timer);
-      resolveOne(true);
-    });
-  });
-  if (exited) return;
-  tryKill("SIGKILL");
-  await new Promise<void>((resolveOne) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolveOne();
-      return;
-    }
-    const timer = setTimeout(() => resolveOne(), 1_000);
-    child.once("exit", () => {
-      clearTimeout(timer);
-      resolveOne();
-    });
-  });
-}
-
-/**
- * Result of observing a spawned ChildProcess for its spawn outcome.
- *
- * - `ok=true` means the `spawn` event fired (the child has been started
- *   by the OS).
- * - `ok=false` means the `error` event fired (spawn failed). The
- *   original `Error` is preserved for logging.
- *
- * Resolution is exactly once. The `timeoutMs` watchdog covers the
- * pathological case where neither event arrives (extremely rare, but
- * we never want a promise that never resolves to leak Claude).
- */
-export interface SpawnOutcome {
-  ok: boolean;
-  error?: Error;
-}
-
-/**
- * Observe a single ChildProcess's spawn outcome.
- *
- * Why this exists:
- *
- *   Node ChildProcess spawn failures can be delivered asynchronously
- *   through the `error` event after spawn() returns. Without an
- *   `error` listener, Node raises an unhandled error and crashes the
- *   launcher — which means a single bad wt.exe install (or a typo in
- *   CLAUDE_EMOTE_WT_EXE) takes down Claude.
- *
- *   This helper attaches exactly one `spawn` listener and one `error`
- *   listener, removes them on resolution, and resolves exactly once.
- */
-function waitForSpawnOutcome(
-  child: ChildProcess,
-  timeoutMs = 2_000,
-): Promise<SpawnOutcome> {
-  return new Promise<SpawnOutcome>((resolveOne) => {
-    let resolved = false;
-    const finish = (outcome: SpawnOutcome): void => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      child.removeListener("spawn", onSpawn);
-      child.removeListener("error", onError);
-      resolveOne(outcome);
-    };
-    const onSpawn = (): void => finish({ ok: true });
-    const onError = (err: Error): void => finish({ ok: false, error: err });
-    const timer = setTimeout(() => finish({ ok: false, error: new Error("spawn outcome timed out") }), timeoutMs);
-    child.once("spawn", onSpawn);
-    child.once("error", onError);
-    // The child may have already exited (e.g. very fast failure path).
-    if (child.exitCode !== null || child.signalCode !== null) {
-      finish({ ok: false, error: new Error("child exited before spawn observed") });
-    }
-  });
-}
-
-/**
- * Discriminated result for "can we start Claude yet?" decisions.
- *
- *   - `healthy`: /health responded 200 within the timeout.
- *   - `spawn-error`: the avatar ChildProcess emitted an `error` event.
- *   - `exited`: the avatar ChildProcess exited before becoming healthy.
- *   - `timeout`: the avatar is still alive but /health never succeeded.
- *
- * Used by both the attached-fallback path (where the launcher owns the
- * child) and the wt-pane path (where the wt handle is NOT the avatar;
- * only an avatar-server health timeout applies).
- */
-export type AvatarStartupResult =
-  | { status: "healthy" }
-  | { status: "spawn-error"; error: Error }
-  | { status: "exited"; code: number | null; signal: NodeJS.Signals | null }
-  | { status: "timeout" };
-
-/**
- * Combined readiness operation for an attached avatar ChildProcess.
- *
- * The four possible outcomes are raced:
- *
- *   - /health endpoint returns 200 → healthy
- *   - child emits `error`           → spawn-error
- *   - child emits `exit`            → exited
- *   - `healthTimeoutMs` elapses     → timeout
- *
- * Once any path resolves the result is final. Listeners are removed.
- * If the child exits/errs mid-flight, /health polling stops within
- * one polling tick (~100ms) — we never wait the full timeout after a
- * known failure.
- */
-function waitForAvatarStartup(
-  child: ChildProcess,
-  endpoint: string,
-  healthTimeoutMs: number,
-): Promise<AvatarStartupResult> {
-  return new Promise<AvatarStartupResult>((resolveOne) => {
-    let resolved = false;
-    const finish = (result: AvatarStartupResult): void => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(deadlineTimer);
-      clearInterval(pollTimer);
-      child.removeListener("error", onError);
-      child.removeListener("exit", onExit);
-      resolveOne(result);
-    };
-    const onError = (err: Error): void =>
-      finish({ status: "spawn-error", error: err });
-    const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>
-      finish({ status: "exited", code, signal });
-
-    child.once("error", onError);
-    child.once("exit", onExit);
-
-    // Poll /health. Resolves healthy on the first 200.
-    const healthUrl = new URL("/health", endpoint).toString();
-    const tryHealth = (): void => {
-      const req = request(healthUrl, { method: "GET", timeout: 500 }, (res) => {
-        res.resume();
-        if (res.statusCode === 200) finish({ status: "healthy" });
-      });
-      req.on("error", () => { /* swallow; we'll retry or timeout */ });
-      req.on("timeout", () => req.destroy());
-      req.end();
-    };
-    // Kick once immediately, then on a 100ms tick until resolution.
-    tryHealth();
-    const pollTimer = setInterval(() => {
-      if (!resolved) tryHealth();
-    }, 100);
-
-    const deadlineTimer = setTimeout(
-      () => finish({ status: "timeout" }),
-      healthTimeoutMs,
-    );
-  });
-}
+export type { SpawnOutcome } from "./startup.js";
+export type { AvatarStartupResult } from "./startup.js";
 
 const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
 function dbg(msg: string): void {
@@ -321,32 +135,6 @@ function pickPort(): Promise<number> {
       srv.close(() => resolveReady(port));
     });
   });
-}
-
-async function waitForHealth(url: string, timeoutMs = 5_000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  const healthUrl = new URL("/health", url).toString();
-  while (Date.now() < deadline) {
-    try {
-      const ok = await new Promise<boolean>((resolveOne) => {
-        const req = request(healthUrl, { method: "GET", timeout: 500 }, (res) => {
-          res.resume();
-          resolveOne(res.statusCode === 200);
-        });
-        req.on("error", () => resolveOne(false));
-        req.on("timeout", () => {
-          req.destroy();
-          resolveOne(false);
-        });
-        req.end();
-      });
-      if (ok) return true;
-    } catch {
-      // ignore
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return false;
 }
 
 function spawnClaude(
@@ -460,15 +248,24 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Avatar launch path. avatarSpawnedVia describes ownership:
-  //   - "test":     launcher owns the ChildProcess, explicit cleanup.
-  //   - "attached": launcher owns the ChildProcess, explicit cleanup.
-  //   - "wt":       launcher does NOT own the avatar PID. The
-  //                 returned spawn() handle is the wt.exe pane
-  //                 host, not the avatar. Cleanup on Claude exit
-  //                 relies on the avatar's existing
-  //                 --parentPid=<launcherPid> watcher.
-  let avatarProcess: ChildProcess | null = null;
+  // Avatar launch path. Ownership truthfulness:
+  //
+  //   - ownedAvatarProcess is the ChildProcess we own directly and
+  //     may terminate on Claude exit. It is the actual avatar for
+  //     "test" and "attached" modes, and null for "wt" mode.
+  //   - wtHostProcess is the ChildProcess returned by the wt.exe
+  //     spawn, kept only for diagnostics. It is NOT the avatar and
+  //     must never be terminated as though it were one. The wt
+  //     process typically exits immediately after creating the pane.
+  //   - avatarSpawnedVia describes how the avatar was launched and
+  //     therefore who owns the cleanup:
+  //       * "test":     launcher owns ownedAvatarProcess.
+  //       * "attached": launcher owns ownedAvatarProcess.
+  //       * "wt":       launcher owns NOTHING — ownedAvatarProcess is
+  //                     null. The avatar is reaped via its own
+  //                     --parentPid=<launcherPid> watcher (Phase 4).
+  let ownedAvatarProcess: ChildProcess | null = null;
+  let wtHostProcess: ChildProcess | null = null;
   let avatarSpawnedVia: "test" | "attached" | "wt" = "attached";
 
   /**
@@ -494,14 +291,15 @@ async function main(): Promise<void> {
     // binary. Attached child, no detached, no shell, no wt, no start,
     // no cmd, no unref. The launcher retains the handle and cleans it
     // up at Claude exit.
-    avatarProcess = spawnAttachedAvatar();
+    ownedAvatarProcess = spawnAttachedAvatar();
     avatarSpawnedVia = "test";
   } else if (decision.kind === "windows-terminal" && candidateWtExe) {
     // Inside Windows Terminal + wt.exe resolves: spawn wt.exe -w 0
     // split-pane ... so the avatar runs inside a Windows Terminal
     // pane. The spawned handle is wt.exe (which exits immediately
-    // after pane creation); we store it only for diagnostics — cleanup
-    // goes through the avatar's parent-pid watcher.
+    // after pane creation). The launcher does NOT own the avatar —
+    // ownedAvatarProcess stays null and cleanup is via the avatar's
+    // --parentPid watcher.
     const wtArgs = buildWindowsTerminalArgs({
       title: `claude-emote (${instanceId.slice(0, 6)})`,
       workingDirectory: userCwd,
@@ -540,11 +338,21 @@ async function main(): Promise<void> {
       );
       // The failed wt handle must NOT be stored as the avatar — it is
       // not the avatar. Detach our reference and try directly.
-      avatarProcess = spawnAttachedAvatar();
+      // The fallback owns a real attached avatar.
+      ownedAvatarProcess = spawnAttachedAvatar();
       avatarSpawnedVia = "attached";
     } else {
-      avatarProcess = wtChild;
+      // wt spawn OK. The handle we have is the wt pane host, NOT
+      // the avatar. Store it as wtHostProcess only; ownedAvatarProcess
+      // stays null because we do not own the avatar PID. A harmless
+      // diagnostic error listener keeps a later wt error from being
+      // unhandled — we intentionally do NOT treat it as avatar exit.
+      wtHostProcess = wtChild;
+      ownedAvatarProcess = null;
       avatarSpawnedVia = "wt";
+      wtHostProcess.on("error", (err) => {
+        dbg(`wt host process error (ignored, not the avatar): ${err.message}`);
+      });
     }
   } else {
     // Outside Windows Terminal OR wt.exe not found OR not on
@@ -559,21 +367,20 @@ async function main(): Promise<void> {
           `(${decision.reason}); spawning avatar as an attached child.`,
       );
     }
-    avatarProcess = spawnAttachedAvatar();
+    ownedAvatarProcess = spawnAttachedAvatar();
     avatarSpawnedVia = "attached";
   }
   dbg(`avatar launched via: ${avatarSpawnedVia}`);
 
-  // Race-based startup waiter. Stops early when:
-  //   - /health responds 200         → healthy
-  //   - the avatar child emits error → spawn-error
-  //   - the avatar child exits       → exited
-  //   - the timeout elapses          → timeout
+  // Startup waiter selection:
   //
-  // For "wt" mode, the handle IS the wt process (not the avatar), so
-  // the error/exit legs are not meaningful there — we only use the
-  // health timeout. The wt process typically exits within ~100ms of
-  // spawning the pane anyway, which we ignore.
+  //   - "wt": the launcher does NOT own the avatar ChildProcess — it
+  //     only owns the wt pane host, which may have already exited.
+  //     Readiness is observed ONLY through /health. The wt process's
+  //     own exit/error events are intentionally ignored.
+  //   - "test"/"attached": the launcher owns the avatar ChildProcess,
+  //     so /health / child-error / child-exit / timeout are all valid
+  //     readiness signals.
   const healthTimeoutMs = (() => {
     const raw = process.env.CLAUDE_EMOTE_HEALTH_TIMEOUT_MS;
     if (!raw) return 5_000;
@@ -581,48 +388,68 @@ async function main(): Promise<void> {
     if (!Number.isFinite(parsed) || parsed <= 0) return 5_000;
     return parsed;
   })();
-  const startup = await waitForAvatarStartup(
-    avatarProcess,
-    endpoint,
-    avatarSpawnedVia === "wt" ? healthTimeoutMs : healthTimeoutMs,
-  );
-  switch (startup.status) {
-    case "healthy":
-      dbg("avatar /health responded");
-      break;
-    case "spawn-error":
-      console.error(
-        `[claude-emote] WARNING: avatar spawn failed: ${startup.error.message}. ` +
-          `Starting Claude anyway — no avatar will appear.`,
-      );
-      break;
-    case "exited":
-      console.error(
-        `[claude-emote] WARNING: avatar exited before becoming healthy ` +
-          `(code=${startup.code}, signal=${startup.signal ?? "none"}). ` +
-          `Starting Claude anyway — no avatar will appear.`,
-      );
-      break;
-    case "timeout":
+  let startupHealthy = false;
+  if (avatarSpawnedVia === "wt") {
+    // Endpoint-only readiness: we never observe wtHostProcess.
+    startupHealthy = await waitForEndpointHealth(endpoint, healthTimeoutMs);
+    if (!startupHealthy) {
       console.error(
         `[claude-emote] WARNING: avatar server did not respond to /health within ${healthTimeoutMs}ms.`,
       );
       console.error(
         "[claude-emote] Starting Claude anyway — the avatar will not appear, but Claude is unaffected.",
       );
-      break;
-  }
+    } else {
+      dbg("avatar /health responded (wt mode)");
+    }
+  } else {
+    // Owned avatar: race /health / child-error / child-exit / timeout.
+    // In all non-wt branches we assigned ownedAvatarProcess above
+    // (test, attached, and the wt-fallback-to-attached branch). The
+    // assertion documents this invariant for future readers.
+    if (!ownedAvatarProcess) {
+      throw new Error(
+        "internal: ownedAvatarProcess must be set in non-wt mode",
+      );
+    }
+    const startup = await waitForOwnedAvatarStartup(
+      ownedAvatarProcess,
+      endpoint,
+      healthTimeoutMs,
+    );
+    switch (startup.status) {
+      case "healthy":
+        startupHealthy = true;
+        dbg("avatar /health responded");
+        break;
+      case "spawn-error":
+        console.error(
+          `[claude-emote] WARNING: avatar spawn failed: ${startup.error.message}. ` +
+            `Starting Claude anyway — no avatar will appear.`,
+        );
+        break;
+      case "exited":
+        console.error(
+          `[claude-emote] WARNING: avatar exited before becoming healthy ` +
+            `(code=${startup.code}, signal=${startup.signal ?? "none"}). ` +
+            `Starting Claude anyway — no avatar will appear.`,
+        );
+        break;
+      case "timeout":
+        console.error(
+          `[claude-emote] WARNING: avatar server did not respond to /health within ${healthTimeoutMs}ms.`,
+        );
+        console.error(
+          "[claude-emote] Starting Claude anyway — the avatar will not appear, but Claude is unaffected.",
+        );
+        break;
+    }
 
-  // If we own the avatar and it's still alive but never became
-  // healthy, terminate it before Claude starts. The wt pane avatar
-  // remains parent-watcher-owned; the wt process itself is gone by
-  // now (it exits once the pane is created).
-  if (
-    avatarSpawnedVia !== "wt" &&
-    startup.status !== "healthy" &&
-    avatarProcess
-  ) {
-    await terminateOwnedAvatar(avatarProcess);
+    // If we own the avatar and it's still alive but never became
+    // healthy, terminate it before Claude starts.
+    if (!startupHealthy && ownedAvatarProcess) {
+      await terminateOwnedAvatar(ownedAvatarProcess);
+    }
   }
 
   const childEnv: NodeJS.ProcessEnv = {
@@ -679,7 +506,7 @@ async function main(): Promise<void> {
       // the avatar, and the avatar's --parentPid watcher reaps the
       // avatar when this process exits (~1.5s after Claude closes).
       if (avatarSpawnedVia !== "wt") {
-        await terminateOwnedAvatar(avatarProcess);
+        await terminateOwnedAvatar(ownedAvatarProcess);
       }
       process.exit(exitCode);
     })();
