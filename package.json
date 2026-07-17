@@ -11,15 +11,20 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
-    "test:unit": "vitest run tests/unit",
-    "test:integration": "vitest run tests/integration",
+    "prepack": "npm run build",
+    "pretest": "npm run build",
+    "test": "vitest run --no-file-parallelism --pool=forks",
+    "test:unit": "vitest run tests/unit --no-file-parallelism --pool=forks",
+    "test:integration": "vitest run tests/integration --no-file-parallelism --pool=forks",
+    "test:focused": "vitest run --no-file-parallelism --pool=forks",
     "benchmark:bridge": "node scripts/benchmark-bridge.mjs",
     "demo": "node scripts/demo-states.mjs",
-    "verify:upstream": "node scripts/verify-upstream.mjs"
+    "verify:upstream": "node scripts/verify-upstream.mjs",
+    "validate:plugin": "claude plugin validate . --strict",
+    "validate:package": "node scripts/validate-package.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-tui": "0.74.2",
     "@types/adm-zip": "^0.5.8",
     "adm-zip": "^0.6.0"
   },
@@ -27,5 +32,23 @@
     "@types/node": "^20.14.10",
     "typescript": "^5.5.4",
     "vitest": "^2.0.5"
-  }
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "bin",
+    "bin/**",
+    "hooks/hooks.json",
+    ".claude-plugin/plugin.json",
+    "emotes/ascii",
+    "emotes/ascii/**",
+    "emotes/default",
+    "emotes/default/**",
+    "config.json",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "README.md",
+    "package.json"
+  ]
 }

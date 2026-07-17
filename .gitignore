@@ -1,6 +1,10 @@
 node_modules/
 dist/
 *.log
+*.ndjson
+*.pid
+*.zip
+*.tgz
 .DS_Store
 .env
 .env.local

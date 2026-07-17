@@ -1,0 +1,33 @@
+# Defense-in-depth npm pack exclusions.
+# The primary mechanism is the `files` allowlist in package.json.
+# Anything matched here that is NOT matched by the allowlist is excluded.
+# Anything matched by BOTH means it stays in the tarball.
+#
+# The `files` allowlist intentionally uses file-extension globs
+# (e.g. dist/**/*.js) instead of whole directories. That alone
+# keeps stray .log / .ndjson / .pid sentinels out of the package.
+
+/src/
+/tests/
+/vendor/
+/coverage/
+/.git/
+/.github/
+/.gitignore
+/.npmignore
+
+/docs/
+
+/scripts/
+
+/emotes/_unused/
+/emotes/ascii-bear/
+/emotes/aza_choi/
+/emotes/aza_choi_nobg/
+/emotes/test/
+
+/.tmp/
+**/*.tmp
+**/*.bak
+**/rescue-*
+**/*-rescue-*

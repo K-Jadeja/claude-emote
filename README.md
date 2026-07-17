@@ -18,16 +18,43 @@ hooks.
 └─────────────────────────────────────────┴──────────┘
 ```
 
-## Status
+## Status (Phase 9A)
 
-V1 is feature-complete against the original specification. See
-[INTEGRATION_RESULTS.md](docs/INTEGRATION_RESULTS.md) for measured
-performance and per-event results.
+What is **automatically validated** today:
 
-- 70 automated tests pass (functional + integration + mapper + bridge + server)
-- Server processing p95: **13.7 ms** (target: 300 ms — 20× headroom)
-- All Claude Code lifecycle events supported
-- ASCII + Sixel (via Chafa) rendering
+- Clean-checkout validation: `npm ci && npm test` builds dist via
+  the `pretest` script and runs the full suite without any
+  pre-existing failures.
+- Strict plugin validation: `claude plugin validate . --strict`
+  passes against the development repository.
+- Upstream-source verification: `npm run verify:upstream`
+  confirms the vendored pi-emote snapshot is unmodified.
+- npm package validation: `npm run validate:package` packs the
+  source, installs the tarball into an unrelated temp directory,
+  asserts required entries are present and forbidden entries are
+  absent, runs the installed `claude-emote` `--version` smoke,
+  and spawns the installed `dist/host/avatar-process.js` to
+  prove it resolves bundled assets from the installed package
+  root (not the development repository).
+- ASCII production path: the standalone demo and the avatar
+  process render ASCII frames deterministically against the
+  bundled `emotes/ascii/ascii.yaml`.
+- Image-asset compatibility: the bundled `emotes/default/`
+  PNG set is unpacked and reachable from the installed package.
+
+What is **not yet validated** and remains pending:
+
+- Real interactive Windows Terminal visual validation (a human
+  on Windows 10/11, inside an actual Windows Terminal pane, must
+  confirm the avatar appears, animates, and reacts).
+- Latency measurements (Phase 9B). No benchmark numbers are
+  reported in this README until they are measured on a real
+  machine under Phase 9B conditions.
+- npm publish flow. The package tarball is validated but no
+  registry is contacted.
+
+The total automated test count is reported by `npm test` itself;
+this README does not hardcode a number that can drift.
 
 ## What it is
 
@@ -62,14 +89,16 @@ state decisions are made by a tiny mapper in
 # from this repo (development)
 git clone <this-repo> claude-emote
 cd claude-emote
-npm install
-npm run build
+npm ci
 ```
 
-```powershell
-# globally (once published)
-npm install -g claude-emote
-```
+The `pretest` script automatically builds the dist artifacts on
+`npm test`. For a manual build (e.g. before running the launcher
+directly), use `npm run build`.
+
+For a packaged install (locally produced tarball, no registry
+involved), use `npm run validate:package` — the script
+demonstrates the full flow end-to-end.
 
 ### Run
 
@@ -93,18 +122,25 @@ npm run demo
 ### Verify
 
 ```powershell
-# Run the full test suite
+# Run the full test suite (pretest builds dist automatically).
 npm test
 
-# Run the bridge benchmark
-npm run benchmark:bridge
-
-# Run the end-to-end latency sweep
-node scripts\measure-latency.mjs
-
-# Confirm the vendored pi-emote snapshot is unmodified
+# Confirm the vendored pi-emote snapshot is unmodified.
 npm run verify:upstream
+
+# Validate the Claude plugin manifest strictly.
+npm run validate:plugin
+
+# Pack, install in an unrelated temp dir, run smoke tests.
+npm run validate:package
 ```
+
+The following scripts remain in the repository for developer
+ergonomics but are NOT part of the package's automated validation
+in Phase 9A:
+
+- `npm run benchmark:bridge` — hand-rolled bridge benchmark.
+- `npm run demo` — interactive state demo.
 
 ## How it works
 
@@ -210,9 +246,10 @@ expose this in Settings → Profile → Advanced → "Enable Sixel".
 
 ### Avatar process is still running after Claude exits
 
-This is by design during the 500 ms orphan-detection grace period.
-After 500 ms the parent-PID watcher closes the HTTP server and
-shuts down. If a process persists longer, send `taskkill /F /PID <pid>`.
+This is by design during the orphan-detection grace period. The
+parent-PID watcher closes the HTTP server and shuts the avatar
+down once the launcher exits. If a process persists longer, send
+`taskkill /F /PID <pid>`.
 
 ### Tests fail with "verify-upstream: 1 mismatch(es)"
 
@@ -233,11 +270,9 @@ commit.
 - The avatar pane is separate from Claude Code's TUI because Claude
   Code does not expose an arbitrary embedded widget slot. This is
   not a workaround — it is the architectural choice the spec made.
-- The bridge is a Node.js process. On Windows, the OS-level spawn
-  cost (~80-150 ms) is outside our control and pushes total
-  wall-clock past the 50 ms p50 target. The bridge's own JS runs
-  in 15-30 ms; on Linux/macOS the same path meets the target
-  comfortably.
+- Latency budgets are pending Phase 9B. Do not rely on the bridge
+  benchmark numbers from older revisions — they have not been
+  re-measured on this codebase yet.
 - Sixel rendering requires Chafa and a Sixel-capable terminal.
 - We do not detect hidden reasoning tokens. `think` is inferred
   from lifecycle events only.
@@ -245,7 +280,7 @@ commit.
 ## Uninstall
 
 ```powershell
-# Remove the global command
+# Remove the global command (only relevant if you installed via npm)
 npm uninstall -g claude-emote
 
 # Remove local dev checkout

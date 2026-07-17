@@ -53,14 +53,24 @@ describe("EventMapper (M3)", () => {
     .filter((f) => !f.startsWith("malformed"))
     .sort();
 
-  for (const f of fixtureFiles) {
-    const stem = basename(f, ".json");
+  // Hard contract: every non-malformed fixture MUST have an entry
+  // in EXPECTED. A missing entry is a test bug, not a skip — the
+  // suite must fail loudly so the gap is filled deliberately.
+  const unmappedStems = fixtureFiles
+    .map((f) => basename(f, ".json"))
+    .filter((stem) => EXPECTED[stem] === undefined);
+
+  it("has an explicit contract for every non-malformed fixture", () => {
+    expect(unmappedStems).toEqual([]);
+  });
+
+  const mappedStems = fixtureFiles
+    .map((f) => basename(f, ".json"))
+    .filter((stem) => EXPECTED[stem] !== undefined);
+
+  for (const stem of mappedStems) {
     const expected = EXPECTED[stem];
-    if (!expected) {
-      // Defensive: a fixture without a contract entry is a test bug.
-      it.skip(`[unmapped] ${stem}`, () => {});
-      continue;
-    }
+    const f = `${stem}.json`;
     it(`maps ${stem} -> ${expected.state ?? "(shutdown)"}`, () => {
       const fixture = loadFixture(f) as HookEvent;
       const reaction = mapEvent(fixture);
