@@ -348,7 +348,7 @@ describe("launcher (P3 integration, isolated)", () => {
   );
 
   it(
-    "three consecutive launcher runs leave zero fake-avatar processes (no orphan windows)",
+    "test-mode three-run orphan gate leaves no surviving avatar processes",
     { timeout: TEST_TIMEOUT * 2 },
     async () => {
       // Reset the PID log so we only count avatars from this test.
@@ -361,8 +361,15 @@ describe("launcher (P3 integration, isolated)", () => {
             `run #${i + 1}: launcher exited ${code}; stderr:\n${stderr}`,
           );
         }
-        // Each run's debug log must record test-mode avatar spawn and
-        // explicit termination.
+        // Explicit launch-path assertion: runLauncher() sets
+        // CLAUDE_EMOTE_TEST_MODE=1 in the helper, so the launcher
+        // must take the test branch. This is the genuine Phase 3
+        // test-mode regression — the companion attached-fallback
+        // regression lives in windows-terminal-launcher.test.ts.
+        expect(stderr).toMatch(/avatar launched via: test/);
+        // No visible terminal pane was requested.
+        expect(stderr).not.toMatch(/avatar launched via: wt/);
+        expect(stderr).not.toMatch(/avatar launched via: attached/);
         expect(stderr).toMatch(/avatar exe:/);
         expect(stderr).toMatch(/claude child closed/);
       }

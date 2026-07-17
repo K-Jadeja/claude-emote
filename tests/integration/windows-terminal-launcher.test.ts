@@ -1049,14 +1049,29 @@ process.on("exit", () => clearInterval(t));
   );
 
   /**
-   * Test E (test-mode three-run regression):
+   * Test E (attached-fallback three-run regression):
    * the previously-unexplained flake reported "1 failed | 11 passed"
-   * before later runs passed. Run the launcher test-mode orphan gate
-   * three times in this file too, so the fail-open suite carries the
-   * regression check.
+   * before later runs passed. Run the launcher attached-fallback
+   * orphan gate three times in this file too, so the fail-open
+   * suite carries the regression check.
+   *
+   * The companion test-mode regression lives in launcher.test.ts.
+   *
+   * Why this is "attached fallback" and NOT "test mode":
+   *   - CLAUDE_EMOTE_TEST_MODE is intentionally NOT set (deleted)
+   *   - WT_SESSION is intentionally NOT set (deleted)
+   *   - CLAUDE_EMOTE_TEST_PLATFORM is "win32" (the launcher's
+   *     decideAvatarLaunchMode() takes the "not-inside-windows-terminal"
+   *     branch and resolves to "attached")
+   *   - CLAUDE_EMOTE_WT_EXE is set so findWindowsTerminalExecutable()
+   *     returns a real path, but the launcher must NOT consult it
+   *     because WT_SESSION is absent.
+   *   - stderr must contain "avatar launched via: attached".
+   *   - The fake wt record file must NOT be written (proves the
+   *     launcher skipped the Windows Terminal branch).
    */
   it(
-    "test-mode three-run orphan gate leaves no surviving avatar processes",
+    "attached-fallback three-run orphan gate leaves no surviving avatar processes",
     { timeout: TEST_TIMEOUT * 2 },
     async () => {
       writeFileSync(PIDS_RECORD, "[]\n", "utf8");
@@ -1074,7 +1089,15 @@ process.on("exit", () => clearInterval(t));
         };
         delete env.WT_SESSION;
         delete env.LOCALAPPDATA;
+        // Intentionally NOT setting CLAUDE_EMOTE_TEST_MODE here —
+        // this test exercises the attached-fallback branch, not
+        // the test-mode branch. The companion test in launcher.test.ts
+        // sets CLAUDE_EMOTE_TEST_MODE=1.
         delete env.CLAUDE_EMOTE_TEST_MODE;
+        // Clear the fake-wt record at the start of each iteration so
+        // a leftover from an earlier loop cannot be misread as
+        // "wt was invoked this run".
+        try { rmSync(WT_RECORD, { force: true }); } catch {}
         const res = await new Promise<{ code: number; stderr: string }>(
           (r, j) => {
             const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
@@ -1092,7 +1115,15 @@ process.on("exit", () => clearInterval(t));
             `run #${i + 1}: launcher exited ${res.code}; stderr:\n${res.stderr}`,
           );
         }
-        expect(res.stderr).toMatch(/attached/);
+        // Explicit launch-path assertion: the launcher must take the
+        // attached fallback branch on win32 + no WT_SESSION + no
+        // TEST_MODE.
+        expect(res.stderr).toMatch(/avatar launched via: attached/);
+        // And must NOT take the Windows Terminal branch.
+        expect(res.stderr).not.toMatch(/avatar launched via: wt/);
+        // The fake wt record file MUST NOT exist after this run —
+        // proves the launcher never spawned wt.exe.
+        expect(existsSync(WT_RECORD)).toBe(false);
       }
       const recorded: Array<{ pid: number; port: number; startedAt: number }> =
         JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
