@@ -129,6 +129,144 @@ async function terminateOwnedAvatar(
   });
 }
 
+/**
+ * Result of observing a spawned ChildProcess for its spawn outcome.
+ *
+ * - `ok=true` means the `spawn` event fired (the child has been started
+ *   by the OS).
+ * - `ok=false` means the `error` event fired (spawn failed). The
+ *   original `Error` is preserved for logging.
+ *
+ * Resolution is exactly once. The `timeoutMs` watchdog covers the
+ * pathological case where neither event arrives (extremely rare, but
+ * we never want a promise that never resolves to leak Claude).
+ */
+export interface SpawnOutcome {
+  ok: boolean;
+  error?: Error;
+}
+
+/**
+ * Observe a single ChildProcess's spawn outcome.
+ *
+ * Why this exists:
+ *
+ *   Node ChildProcess spawn failures can be delivered asynchronously
+ *   through the `error` event after spawn() returns. Without an
+ *   `error` listener, Node raises an unhandled error and crashes the
+ *   launcher — which means a single bad wt.exe install (or a typo in
+ *   CLAUDE_EMOTE_WT_EXE) takes down Claude.
+ *
+ *   This helper attaches exactly one `spawn` listener and one `error`
+ *   listener, removes them on resolution, and resolves exactly once.
+ */
+function waitForSpawnOutcome(
+  child: ChildProcess,
+  timeoutMs = 2_000,
+): Promise<SpawnOutcome> {
+  return new Promise<SpawnOutcome>((resolveOne) => {
+    let resolved = false;
+    const finish = (outcome: SpawnOutcome): void => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      child.removeListener("spawn", onSpawn);
+      child.removeListener("error", onError);
+      resolveOne(outcome);
+    };
+    const onSpawn = (): void => finish({ ok: true });
+    const onError = (err: Error): void => finish({ ok: false, error: err });
+    const timer = setTimeout(() => finish({ ok: false, error: new Error("spawn outcome timed out") }), timeoutMs);
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
+    // The child may have already exited (e.g. very fast failure path).
+    if (child.exitCode !== null || child.signalCode !== null) {
+      finish({ ok: false, error: new Error("child exited before spawn observed") });
+    }
+  });
+}
+
+/**
+ * Discriminated result for "can we start Claude yet?" decisions.
+ *
+ *   - `healthy`: /health responded 200 within the timeout.
+ *   - `spawn-error`: the avatar ChildProcess emitted an `error` event.
+ *   - `exited`: the avatar ChildProcess exited before becoming healthy.
+ *   - `timeout`: the avatar is still alive but /health never succeeded.
+ *
+ * Used by both the attached-fallback path (where the launcher owns the
+ * child) and the wt-pane path (where the wt handle is NOT the avatar;
+ * only an avatar-server health timeout applies).
+ */
+export type AvatarStartupResult =
+  | { status: "healthy" }
+  | { status: "spawn-error"; error: Error }
+  | { status: "exited"; code: number | null; signal: NodeJS.Signals | null }
+  | { status: "timeout" };
+
+/**
+ * Combined readiness operation for an attached avatar ChildProcess.
+ *
+ * The four possible outcomes are raced:
+ *
+ *   - /health endpoint returns 200 → healthy
+ *   - child emits `error`           → spawn-error
+ *   - child emits `exit`            → exited
+ *   - `healthTimeoutMs` elapses     → timeout
+ *
+ * Once any path resolves the result is final. Listeners are removed.
+ * If the child exits/errs mid-flight, /health polling stops within
+ * one polling tick (~100ms) — we never wait the full timeout after a
+ * known failure.
+ */
+function waitForAvatarStartup(
+  child: ChildProcess,
+  endpoint: string,
+  healthTimeoutMs: number,
+): Promise<AvatarStartupResult> {
+  return new Promise<AvatarStartupResult>((resolveOne) => {
+    let resolved = false;
+    const finish = (result: AvatarStartupResult): void => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(deadlineTimer);
+      clearInterval(pollTimer);
+      child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
+      resolveOne(result);
+    };
+    const onError = (err: Error): void =>
+      finish({ status: "spawn-error", error: err });
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>
+      finish({ status: "exited", code, signal });
+
+    child.once("error", onError);
+    child.once("exit", onExit);
+
+    // Poll /health. Resolves healthy on the first 200.
+    const healthUrl = new URL("/health", endpoint).toString();
+    const tryHealth = (): void => {
+      const req = request(healthUrl, { method: "GET", timeout: 500 }, (res) => {
+        res.resume();
+        if (res.statusCode === 200) finish({ status: "healthy" });
+      });
+      req.on("error", () => { /* swallow; we'll retry or timeout */ });
+      req.on("timeout", () => req.destroy());
+      req.end();
+    };
+    // Kick once immediately, then on a 100ms tick until resolution.
+    tryHealth();
+    const pollTimer = setInterval(() => {
+      if (!resolved) tryHealth();
+    }, 100);
+
+    const deadlineTimer = setTimeout(
+      () => finish({ status: "timeout" }),
+      healthTimeoutMs,
+    );
+  });
+}
+
 const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
 function dbg(msg: string): void {
   if (debug) process.stderr.write(`[claude-emote] ${msg}\n`);
@@ -333,18 +471,30 @@ async function main(): Promise<void> {
   let avatarProcess: ChildProcess | null = null;
   let avatarSpawnedVia: "test" | "attached" | "wt" = "attached";
 
-  if (testMode) {
-    // Test seam: spawn the avatar directly with the current node
-    // binary. Attached child, no detached, no shell, no wt, no start,
-    // no cmd, no unref. The launcher retains the handle and cleans it
-    // up at Claude exit.
-    avatarProcess = spawn(
+  /**
+   * Spawn the avatar as a directly-attached child. Used in two cases:
+   * (a) the WT branch fell back here because wt.exe failed to spawn,
+   * (b) we're outside Windows Terminal / wt.exe is missing / non-Windows.
+   *
+   * Production shape: shell:false, detached:false, no start, no cmd,
+   * no unref. The handle is owned by the launcher.
+   */
+  const spawnAttachedAvatar = (): ChildProcess => {
+    return spawn(
       process.execPath,
       [avatarScript, ...avatarScriptArgs],
       {
         stdio: ["ignore", "inherit", "inherit"],
       },
     );
+  };
+
+  if (testMode) {
+    // Test seam: spawn the avatar directly with the current node
+    // binary. Attached child, no detached, no shell, no wt, no start,
+    // no cmd, no unref. The launcher retains the handle and cleans it
+    // up at Claude exit.
+    avatarProcess = spawnAttachedAvatar();
     avatarSpawnedVia = "test";
   } else if (decision.kind === "windows-terminal" && candidateWtExe) {
     // Inside Windows Terminal + wt.exe resolves: spawn wt.exe -w 0
@@ -370,13 +520,32 @@ async function main(): Promise<void> {
     const spawnArgs = isNodeScript
       ? [candidateWtExe, ...wtArgs]
       : wtArgs;
-    avatarProcess = spawn(spawnExe, spawnArgs, {
+    const wtChild = spawn(spawnExe, spawnArgs, {
       shell: false,
       detached: false,
       stdio: "ignore",
       windowsHide: true,
     });
-    avatarSpawnedVia = "wt";
+
+    // Observe the wt spawn outcome asynchronously so a wt-side spawn
+    // failure (EACCES, EINVAL, ENOENT inside Node's spawn path) does
+    // not crash the launcher. On error we fall back to an attached
+    // avatar and proceed.
+    const wtOutcome = await waitForSpawnOutcome(wtChild, 2_000);
+    if (!wtOutcome.ok) {
+      const reason = (wtOutcome.error && wtOutcome.error.message) || "unknown";
+      console.error(
+        `[claude-emote] Windows Terminal launch failed: ${reason}; ` +
+          `using attached avatar fallback.`,
+      );
+      // The failed wt handle must NOT be stored as the avatar — it is
+      // not the avatar. Detach our reference and try directly.
+      avatarProcess = spawnAttachedAvatar();
+      avatarSpawnedVia = "attached";
+    } else {
+      avatarProcess = wtChild;
+      avatarSpawnedVia = "wt";
+    }
   } else {
     // Outside Windows Terminal OR wt.exe not found OR not on
     // Windows: launch as an attached child of the launcher. The
@@ -390,25 +559,70 @@ async function main(): Promise<void> {
           `(${decision.reason}); spawning avatar as an attached child.`,
       );
     }
-    avatarProcess = spawn(
-      process.execPath,
-      [avatarScript, ...avatarScriptArgs],
-      {
-        stdio: ["ignore", "inherit", "inherit"],
-      },
-    );
+    avatarProcess = spawnAttachedAvatar();
     avatarSpawnedVia = "attached";
   }
   dbg(`avatar launched via: ${avatarSpawnedVia}`);
 
-  const health = await waitForHealth(endpoint);
-  if (!health) {
-    console.error(
-      "[claude-emote] WARNING: avatar server did not respond to /health within 5s.",
-    );
-    console.error(
-      "[claude-emote] Starting Claude anyway — the avatar will not appear, but Claude is unaffected.",
-    );
+  // Race-based startup waiter. Stops early when:
+  //   - /health responds 200         → healthy
+  //   - the avatar child emits error → spawn-error
+  //   - the avatar child exits       → exited
+  //   - the timeout elapses          → timeout
+  //
+  // For "wt" mode, the handle IS the wt process (not the avatar), so
+  // the error/exit legs are not meaningful there — we only use the
+  // health timeout. The wt process typically exits within ~100ms of
+  // spawning the pane anyway, which we ignore.
+  const healthTimeoutMs = (() => {
+    const raw = process.env.CLAUDE_EMOTE_HEALTH_TIMEOUT_MS;
+    if (!raw) return 5_000;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 5_000;
+    return parsed;
+  })();
+  const startup = await waitForAvatarStartup(
+    avatarProcess,
+    endpoint,
+    avatarSpawnedVia === "wt" ? healthTimeoutMs : healthTimeoutMs,
+  );
+  switch (startup.status) {
+    case "healthy":
+      dbg("avatar /health responded");
+      break;
+    case "spawn-error":
+      console.error(
+        `[claude-emote] WARNING: avatar spawn failed: ${startup.error.message}. ` +
+          `Starting Claude anyway — no avatar will appear.`,
+      );
+      break;
+    case "exited":
+      console.error(
+        `[claude-emote] WARNING: avatar exited before becoming healthy ` +
+          `(code=${startup.code}, signal=${startup.signal ?? "none"}). ` +
+          `Starting Claude anyway — no avatar will appear.`,
+      );
+      break;
+    case "timeout":
+      console.error(
+        `[claude-emote] WARNING: avatar server did not respond to /health within ${healthTimeoutMs}ms.`,
+      );
+      console.error(
+        "[claude-emote] Starting Claude anyway — the avatar will not appear, but Claude is unaffected.",
+      );
+      break;
+  }
+
+  // If we own the avatar and it's still alive but never became
+  // healthy, terminate it before Claude starts. The wt pane avatar
+  // remains parent-watcher-owned; the wt process itself is gone by
+  // now (it exits once the pane is created).
+  if (
+    avatarSpawnedVia !== "wt" &&
+    startup.status !== "healthy" &&
+    avatarProcess
+  ) {
+    await terminateOwnedAvatar(avatarProcess);
   }
 
   const childEnv: NodeJS.ProcessEnv = {
@@ -426,35 +640,91 @@ async function main(): Promise<void> {
     env: childEnv,
   });
 
-  child.on("close", async (code) => {
+  child.on("close", (code) => {
     dbg(`claude child closed with code ${code}`);
     const finalCode = code ?? 0;
-    // Cleanup the avatar ONLY when we own its ChildProcess handle.
-    // The wt.exe pane path does NOT — the spawned handle is wt, not
-    // the avatar, and the avatar's --parentPid watcher reaps the
-    // avatar when this process exits (~1.5s after Claude closes).
-    if (avatarSpawnedVia !== "wt") {
-      await terminateOwnedAvatar(avatarProcess);
-    }
-    process.exit(finalCode);
+    void finalizeLauncher(finalCode, "claude-close");
   });
   child.on("exit", (code) => {
     dbg(`claude child exit with code ${code}`);
   });
+  // If Claude's spawn fails asynchronously (rare — existence was
+  // already verified, but ENOENT can still race with PATH lookup),
+  // route it through the same finalizer so the launcher exits cleanly
+  // with exit 1 instead of crashing on an unhandled `error`.
+  child.on("error", (err) => {
+    console.error(`[claude-emote] WARNING: claude child error: ${err.message}`);
+    void finalizeLauncher(1, "claude-error");
+  });
 
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, async () => {
-      try {
-        child.kill(sig);
-      } catch {}
-      // Forward the signal to the Claude child already happened
-      // above. Now also forward to a directly-owned avatar (test
-      // mode or attached fallback) — the wt pane path relies on the
-      // parent-pid watcher, not on us killing the avatar here.
+  /**
+   * One idempotent finalizer.
+   *
+   *   - First call owns finalization (creates the cached promise).
+   *   - Subsequent calls return the same promise; nothing runs twice.
+   *   - The owned attached/test avatar is cleaned at most once.
+   *   - process.exit() is called in exactly one place.
+   *
+   * The `kind` parameter lets us tell which closure fired first when
+   * a signal races with Claude's close. Useful for logs and for the
+   * SIGTERM/SIGINT-vs-Claude-close race test.
+   */
+  let finalizePromise: Promise<void> | null = null;
+  function finalizeLauncher(exitCode: number, kind: string): Promise<void> {
+    if (finalizePromise) return finalizePromise;
+    finalizePromise = (async () => {
+      dbg(`finalize start (${kind}, exitCode=${exitCode})`);
+      // Cleanup the avatar ONLY when we own its ChildProcess handle.
+      // The wt.exe pane path does NOT — the spawned handle is wt, not
+      // the avatar, and the avatar's --parentPid watcher reaps the
+      // avatar when this process exits (~1.5s after Claude closes).
       if (avatarSpawnedVia !== "wt") {
         await terminateOwnedAvatar(avatarProcess);
       }
-      process.exit(0);
+      process.exit(exitCode);
+    })();
+    return finalizePromise;
+  }
+
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      dbg(`signal received: ${sig}`);
+      try {
+        child.kill(sig);
+      } catch {}
+      // Signal semantics:
+      //   SIGINT  → exit 130
+      //   SIGTERM → exit 143
+      const exitCode = sig === "SIGINT" ? 130 : 143;
+      void finalizeLauncher(exitCode, `signal:${sig}`);
+    });
+  }
+
+  /**
+   * Test-only stdin hook.
+   *
+   *   On Windows, Node does not reliably deliver `process.on("SIGTERM")`
+   *   when a parent process kills us via `process.kill(pid, "SIGTERM")`
+   *   (Node uses `TerminateProcess` which does not surface to Node's
+   *   signal handlers). For automated tests that need to exercise the
+   *   SIGINT/SIGTERM finalize-once semantics deterministically, we
+   *   expose `CLAUDE_EMOTE_TEST_FORCE_SIGNAL`: when set to `SIGINT` or
+   *   `SIGTERM`, an EOF on the launcher's stdin triggers the matching
+   *   signal handler. The production process inherits stdio, so for
+   *   normal users this env is never set and the hook is a no-op.
+   */
+  const forceSignal = process.env.CLAUDE_EMOTE_TEST_FORCE_SIGNAL;
+  if (forceSignal === "SIGINT" || forceSignal === "SIGTERM") {
+    // Resume stdin so 'end' fires when the parent closes the pipe.
+    // Without this, process.stdin sits in paused mode and never emits.
+    process.stdin?.resume();
+    process.stdin?.on("end", () => {
+      dbg(`stdin end → firing ${forceSignal} handler (test seam)`);
+      const exitCode = forceSignal === "SIGINT" ? 130 : 143;
+      try {
+        child.kill(forceSignal);
+      } catch {}
+      void finalizeLauncher(exitCode, `stdin:${forceSignal}`);
     });
   }
 }

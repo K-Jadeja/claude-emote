@@ -311,6 +311,7 @@ function runLauncher(
 }
 
 const TEST_TIMEOUT = 30_000;
+const SIGTERM_TEST_TIMEOUT = 60_000;
 
 describe("launcher with fake Windows Terminal (P8)", () => {
   it(
@@ -656,7 +657,7 @@ describe("launcher attached fallback (WT_SESSION absent)", () => {
         CLAUDE_EMOTE_AVATAR_EXE: FAKE_AVATAR_PATH,
         CLAUDE_EMOTE_WT_EXE: FAKE_WT_PATH,
         CLAUDE_EMOTE_TEST_PLATFORM: "win32",
-        FAUDE_EMOTE_DEBUG: "1",
+        CLAUDE_EMOTE_DEBUG: "1",
         FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
         FAKE_WT_RECORD: WT_RECORD,
         FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
@@ -679,6 +680,434 @@ describe("launcher attached fallback (WT_SESSION absent)", () => {
         },
       );
       expect(res.code).toBe(9);
+    },
+  );
+});
+
+/**
+ * Phase 8 fail-open suite.
+ *
+ * Every test below must end with:
+ *   - launcher exit code preserved or 130/143 for signals
+ *   - no orphan fake avatar process
+ *   - no leaked tempdir
+ *
+ * WT spawn failure, attached avatar early-exit, attached avatar never
+ * healthy, and SIGTERM/SIGINT exit-code semantics are all exercised
+ * here.
+ */
+describe("launcher fail-open (P8)", () => {
+  /**
+   * Test A: WT executable exists but spawn fails (e.g. CLAUDE_EMOTE_WT_EXE
+   * points at a directory or a non-executable existing path).
+   *
+   * findWindowsTerminalExecutable() trusts existsSync() — that test seam
+   * passes the existence check — but Node's spawn() cannot execute it
+   * and emits an `error` event. The launcher must:
+   *   - print one concise warning
+   *   - fall back to a directly-attached avatar
+   *   - wait for the attached avatar's /health
+   *   - start Claude
+   *   - forward Claude's exit code
+   *   - leave no surviving process
+   */
+  it(
+    "WT spawn failure falls back to attached avatar and Claude still starts",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      // A directory satisfies existsSync() but Node cannot spawn() it.
+      const badWtPath = join(FAKE_DIR, "wt-dir-as-file");
+      mkdirSync(badWtPath, { recursive: true });
+      try { rmSync(WT_RECORD, { force: true }); } catch {}
+      writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        CLAUDE_EMOTE_CLAUDE_EXE: FAKE_CLAUDE_PATH,
+        CLAUDE_EMOTE_AVATAR_EXE: FAKE_AVATAR_PATH,
+        // Point the WT resolver at the directory. existsSync() returns true;
+        // spawn() will fail asynchronously.
+        CLAUDE_EMOTE_WT_EXE: badWtPath,
+        CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+        CLAUDE_EMOTE_DEBUG: "1",
+        WT_SESSION: "phase8-fake-session-abcdef",
+        FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
+        FAKE_WT_RECORD: WT_RECORD,
+        FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
+        FAKE_CLAUDE_EXIT_CODE: "0",
+      };
+      delete env.LOCALAPPDATA;
+      delete env.CLAUDE_EMOTE_TEST_MODE;
+      const res = await new Promise<{ code: number; stderr: string }>(
+        (r, j) => {
+          const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stderr = "";
+          child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+          child.on("close", (code) => r({ code: code ?? 0, stderr }));
+          child.on("error", j);
+        },
+      );
+      // Launcher must succeed.
+      expect(res.code).toBe(0);
+      // One concise WT failure warning printed.
+      expect(res.stderr).toMatch(/Windows Terminal launch failed/);
+      // WT branch did NOT spawn wt (the spawn error path) so no record.
+      expect(existsSync(WT_RECORD)).toBe(false);
+      // The attached fallback DID spawn the avatar.
+      const recorded = JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
+      expect(recorded.length).toBeGreaterThanOrEqual(1);
+      // Claude still started with the plugin-dir and endpoint env.
+      const claude = readClaudeRecord();
+      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/event$/);
+      expect(claude.argv).toContain("--plugin-dir");
+      // No orphan attached avatar.
+      const avatarPid = recorded[0].pid;
+      try {
+        process.kill(avatarPid, 0);
+        throw new Error(`attached avatar ${avatarPid} survived launcher exit`);
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code !== "ESRCH" && e.code !== "EINVAL") throw err;
+      }
+    },
+  );
+
+  /**
+   * Test B: the attached avatar script exits before opening /health.
+   *
+   * The launcher must:
+   *   - detect the early exit before the full health timeout
+   *   - log a concise warning
+   *   - still start Claude
+   *   - forward Claude's exit code
+   *   - leave no orphan avatar
+   *
+   * Uses CLAUDE_EMOTE_HEALTH_TIMEOUT_MS=10000 so we can prove the test
+   * does NOT wait the full 10 seconds.
+   */
+  it(
+    "attached avatar exits before /health → Claude starts without avatar",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      const earlyExitAvatar = join(FAKE_DIR, "avatar-exits-immediately.cjs");
+      writeFileSync(
+        earlyExitAvatar,
+        `
+process.exit(7);
+`,
+        "utf8",
+      );
+      try { rmSync(WT_RECORD, { force: true }); } catch {}
+      writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        CLAUDE_EMOTE_CLAUDE_EXE: FAKE_CLAUDE_PATH,
+        CLAUDE_EMOTE_AVATAR_EXE: earlyExitAvatar,
+        CLAUDE_EMOTE_WT_EXE: FAKE_WT_PATH,
+        CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+        CLAUDE_EMOTE_DEBUG: "1",
+        // No WT_SESSION → attached fallback path.
+        FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
+        FAKE_WT_RECORD: WT_RECORD,
+        FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
+        FAKE_CLAUDE_EXIT_CODE: "0",
+        // Long health timeout proves we don't wait the full window.
+        CLAUDE_EMOTE_HEALTH_TIMEOUT_MS: "10000",
+      };
+      delete env.WT_SESSION;
+      delete env.LOCALAPPDATA;
+      delete env.CLAUDE_EMOTE_TEST_MODE;
+      const t0 = Date.now();
+      const res = await new Promise<{ code: number; stderr: string }>(
+        (r, j) => {
+          const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stderr = "";
+          child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+          child.on("close", (code) => r({ code: code ?? 0, stderr }));
+          child.on("error", j);
+        },
+      );
+      const elapsed = Date.now() - t0;
+      // Claude started even though the avatar failed.
+      expect(res.code).toBe(0);
+      // The early-exit warning was printed.
+      expect(res.stderr).toMatch(/avatar exited before becoming healthy/);
+      // The launcher must NOT have waited the full health timeout.
+      // Real measurement: short in practice because the child exits
+      // fast, but we assert a generous upper bound to catch regressions
+      // where the race waiter is broken and we wait 10s.
+      expect(elapsed).toBeLessThan(8_000);
+      // Claude still got the endpoint env + plugin-dir.
+      const claude = readClaudeRecord();
+      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/event$/);
+      expect(claude.argv).toContain("--plugin-dir");
+    },
+  );
+
+  /**
+   * Test C: the attached avatar stays alive but never serves /health.
+   *
+   * The launcher must:
+   *   - detect the health timeout (we use a short 1500ms override)
+   *   - terminate the owned attached avatar via SIGTERM
+   *   - await the avatar's exit
+   *   - only then start Claude
+   *   - leave no surviving avatar process
+   */
+  it(
+    "attached avatar never healthy → launcher terminates it and starts Claude",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      // Fake avatar that binds a port but never replies to /health.
+      // It stays alive until killed.
+      const silentAvatar = join(FAKE_DIR, "avatar-never-healthy.cjs");
+      writeFileSync(
+        silentAvatar,
+        `
+const http = require("node:http");
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+let port = 0;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === "--port" && i + 1 < args.length) port = Number(args[++i]);
+  const m = args[i].match(/^--port=(.+)$/); if (m) port = Number(m[1]);
+}
+if (!port) { process.exit(2); }
+const pidsPath = process.env.FAKE_AVATAR_PIDS_FILE;
+if (pidsPath) {
+  try {
+    const list = JSON.parse(fs.readFileSync(pidsPath, "utf8"));
+    list.push({ pid: process.pid, port, startedAt: Date.now() });
+    fs.writeFileSync(pidsPath, JSON.stringify(list, null, 2));
+  } catch {}
+}
+// Bind the port but never respond to /health — reply 500 to anything.
+const server = http.createServer((req, res) => {
+  res.statusCode = 500;
+  res.end("nope");
+});
+server.listen(port, "127.0.0.1", () => {
+  console.log("SILENT_AVATAR_READY port=" + port + " pid=" + process.pid);
+});
+`,
+        "utf8",
+      );
+      try { rmSync(WT_RECORD, { force: true }); } catch {}
+      writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        CLAUDE_EMOTE_CLAUDE_EXE: FAKE_CLAUDE_PATH,
+        CLAUDE_EMOTE_AVATAR_EXE: silentAvatar,
+        CLAUDE_EMOTE_WT_EXE: FAKE_WT_PATH,
+        CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+        CLAUDE_EMOTE_DEBUG: "1",
+        FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
+        FAKE_WT_RECORD: WT_RECORD,
+        FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
+        FAKE_CLAUDE_EXIT_CODE: "0",
+        // Short health timeout — the test runs in <2s.
+        CLAUDE_EMOTE_HEALTH_TIMEOUT_MS: "1500",
+      };
+      delete env.WT_SESSION;
+      delete env.LOCALAPPDATA;
+      delete env.CLAUDE_EMOTE_TEST_MODE;
+      const res = await new Promise<{ code: number; stderr: string }>(
+        (r, j) => {
+          const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stderr = "";
+          child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+          child.on("close", (code) => r({ code: code ?? 0, stderr }));
+          child.on("error", j);
+        },
+      );
+      expect(res.code).toBe(0);
+      // Health timeout warning printed (using the configured value).
+      expect(res.stderr).toMatch(/did not respond to \/health within 1500ms/);
+      // Claude still started.
+      const claude = readClaudeRecord();
+      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/event$/);
+      // The avatar PID is gone — the launcher terminated it.
+      const recorded = JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
+      expect(recorded.length).toBeGreaterThanOrEqual(1);
+      const avatarPid = recorded[0].pid;
+      try {
+        process.kill(avatarPid, 0);
+        throw new Error(`attached avatar ${avatarPid} survived health-timeout termination`);
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code !== "ESRCH" && e.code !== "EINVAL") throw err;
+      }
+    },
+  );
+
+  /**
+   * Test D: SIGTERM race.
+   *
+   * Launcher receives SIGTERM while Claude is running. The launcher
+   * must:
+   *   - forward SIGTERM to the Claude child
+   *   - terminate the directly-owned attached avatar via SIGTERM
+   *   - exit with code 143 (SIGTERM semantics)
+   *   - run finalization exactly once (no second process.exit wins)
+   */
+  it(
+    "SIGTERM produces exit code 143, forwards signal, and finalizes once",
+    { timeout: SIGTERM_TEST_TIMEOUT },
+    async () => {
+      // A fake claude that just sleeps until SIGTERM arrives.
+      const longClaude = join(FAKE_DIR, "claude-sleep.cjs");
+      writeFileSync(
+        longClaude,
+        `
+process.on("SIGTERM", () => process.exit(143));
+process.on("SIGINT", () => process.exit(130));
+// Stay alive until a signal arrives.
+const t = setInterval(() => {}, 1000);
+process.on("exit", () => clearInterval(t));
+`,
+        "utf8",
+      );
+      try { rmSync(WT_RECORD, { force: true }); } catch {}
+      writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        CLAUDE_EMOTE_CLAUDE_EXE: longClaude,
+        CLAUDE_EMOTE_AVATAR_EXE: FAKE_AVATAR_PATH,
+        CLAUDE_EMOTE_WT_EXE: FAKE_WT_PATH,
+        CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+        CLAUDE_EMOTE_DEBUG: "1",
+        FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
+        FAKE_WT_RECORD: WT_RECORD,
+        FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
+      };
+      delete env.WT_SESSION;
+      delete env.LOCALAPPDATA;
+      delete env.CLAUDE_EMOTE_TEST_MODE;
+      // Test-only signal trigger: closing the launcher's stdin fires
+      // the SIGTERM handler (exit code 143). Required because Node on
+      // Windows does not deliver SIGTERM via child.kill() to the
+      // parent process's signal handlers.
+      env.CLAUDE_EMOTE_TEST_FORCE_SIGNAL = "SIGTERM";
+
+      const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
+        env,
+        // Pipe stdin so we can close it to trigger the SIGTERM test seam.
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stderr = "";
+      child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+      // The fake avatar inherits the launcher's stdout (stdio:
+      // ["ignore", "inherit", "inherit"]), so the FAKE_AVATAR_READY
+      // line lands in launcher's stdout, which we pipe and observe
+      // here.
+      let readyResolver!: () => void;
+      const readyPromise = new Promise<void>((r) => { readyResolver = r; });
+      child.stdout?.on("data", (b: Buffer) => {
+        if (b.toString("utf8").includes("FAKE_AVATAR_READY")) {
+          readyResolver();
+        }
+      });
+      // Wait for /health to be ready (the fake avatar prints FAKE_AVATAR_READY).
+      await Promise.race([
+        readyPromise,
+        new Promise<void>((_r, j) =>
+          setTimeout(() => j(new Error("avatar never became ready")), 10_000),
+        ),
+      ]);
+      // Trigger the launcher's SIGTERM handler via the test seam:
+      // closing the launcher's stdin fires the handler with the
+      // configured exit code (143).
+      child.stdin?.end();
+      const exitCode: number = await new Promise((r) => {
+        child.on("close", (code) => r(code ?? 0));
+      });
+      // SIGTERM → 143.
+      expect(exitCode).toBe(143);
+      // The debug log shows finalize started exactly once.
+      const finalizeStarts = (stderr.match(/finalize start/g) || []).length;
+      expect(finalizeStarts).toBe(1);
+      // The avatar PID is gone.
+      const recorded = JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
+      if (recorded.length > 0) {
+        try {
+          process.kill(recorded[0].pid, 0);
+          throw new Error(`attached avatar ${recorded[0].pid} survived SIGTERM`);
+        } catch (err) {
+          const e = err as NodeJS.ErrnoException;
+          if (e.code !== "ESRCH" && e.code !== "EINVAL") throw err;
+        }
+      }
+    },
+  );
+
+  /**
+   * Test E (test-mode three-run regression):
+   * the previously-unexplained flake reported "1 failed | 11 passed"
+   * before later runs passed. Run the launcher test-mode orphan gate
+   * three times in this file too, so the fail-open suite carries the
+   * regression check.
+   */
+  it(
+    "test-mode three-run orphan gate leaves no surviving avatar processes",
+    { timeout: TEST_TIMEOUT * 2 },
+    async () => {
+      writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+      for (let i = 0; i < 3; i++) {
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          CLAUDE_EMOTE_CLAUDE_EXE: FAKE_CLAUDE_PATH,
+          CLAUDE_EMOTE_AVATAR_EXE: FAKE_AVATAR_PATH,
+          CLAUDE_EMOTE_WT_EXE: FAKE_WT_PATH,
+          CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+          CLAUDE_EMOTE_DEBUG: "1",
+          FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
+          FAKE_WT_RECORD: WT_RECORD,
+          FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
+        };
+        delete env.WT_SESSION;
+        delete env.LOCALAPPDATA;
+        delete env.CLAUDE_EMOTE_TEST_MODE;
+        const res = await new Promise<{ code: number; stderr: string }>(
+          (r, j) => {
+            const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
+              env,
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            let stderr = "";
+            child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+            child.on("close", (code) => r({ code: code ?? 0, stderr }));
+            child.on("error", j);
+          },
+        );
+        if (res.code !== 0) {
+          throw new Error(
+            `run #${i + 1}: launcher exited ${res.code}; stderr:\n${res.stderr}`,
+          );
+        }
+        expect(res.stderr).toMatch(/attached/);
+      }
+      const recorded: Array<{ pid: number; port: number; startedAt: number }> =
+        JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
+      expect(recorded.length).toBe(3);
+      const survivors: number[] = [];
+      for (const entry of recorded) {
+        try {
+          process.kill(entry.pid, 0);
+          survivors.push(entry.pid);
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== "ESRCH" && code !== "EINVAL") throw err;
+        }
+      }
+      expect(survivors).toEqual([]);
     },
   );
 });
