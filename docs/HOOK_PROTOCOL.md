@@ -110,8 +110,9 @@ approve, or change Claude behaviour.
 
 ## Performance
 
-The bridge's own JS logic typically runs in 15-30 ms end-to-end. Wall-clock
-overhead on Windows is dominated by `node` process spawn (~80-150 ms on
-this development machine). On Linux/macOS, the same bridge typically
-completes well under the spec's p95 < 100 ms target. See
-`npm run benchmark:bridge` for live numbers on your hardware.
+Numerical performance numbers live in
+[`docs/BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md) and are produced
+by `npm run benchmark:latency`. The doc records four distinct
+metrics — hook-bridge delivery, direct avatar event-to-frame, full
+hook-to-frame, and bridge fail-open — measured on a real
+machine-on-date; they are not universal results.

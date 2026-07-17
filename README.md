@@ -18,38 +18,63 @@ hooks.
 └─────────────────────────────────────────┴──────────┘
 ```
 
-## Status (Phase 9A)
+## Status (Phase 9B)
 
 What is **automatically validated** today:
 
-- Clean-checkout validation: `npm ci && npm test` builds dist via
-  the `pretest` script and runs the full suite without any
-  pre-existing failures.
-- Strict plugin validation: `claude plugin validate . --strict`
-  passes against the development repository.
-- Upstream-source verification: `npm run verify:upstream`
-  confirms the vendored pi-emote snapshot is unmodified.
-- npm package validation: `npm run validate:package` packs the
-  source, installs the tarball into an unrelated temp directory,
-  asserts required entries are present and forbidden entries are
-  absent, runs the installed `claude-emote` `--version` smoke,
-  and spawns the installed `dist/host/avatar-process.js` to
-  prove it resolves bundled assets from the installed package
-  root (not the development repository).
-- ASCII production path: the standalone demo and the avatar
-  process render ASCII frames deterministically against the
-  bundled `emotes/ascii/ascii.yaml`.
-- Image-asset compatibility: the bundled `emotes/default/`
-  PNG set is unpacked and reachable from the installed package.
+- Phase 9A: clean-checkout validation,
+  `claude plugin validate . --strict`,
+  `npm run verify:upstream`,
+  `npm run validate:package`,
+  the bundled ASCII production path, and bundled image-asset
+  compatibility — all passed on the same source tree.
+- Phase 9B: `npm run benchmark:latency` measures the local
+  production path — real compiled hook bridge, real compiled
+  avatar process, real event mapper, real copied Animator,
+  real ASCII renderer, real StandaloneRenderHost — through
+  four distinct metrics:
+  A. hook-bridge delivery
+  B. direct avatar event-to-frame
+  C. full hook-bridge-to-avatar-frame
+  D. hook-bridge fail-open against an unavailable endpoint
+  Full numbers live in
+  [`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md)
+  with raw samples in
+  [`docs/benchmarks/phase9b-raw.json`](docs/benchmarks/phase9b-raw.json).
+  The numbers apply to one machine on one date; they are
+  not universal results.
+
+**Phase 9B latency summary** (measured on one machine on 2026-07-18,
+source commit `7c2cc94`):
+
+| Metric | p50 | p95 | max |
+| ------ | --- | --- | --- |
+| full hook → ASCII stdout frame | 77.88 ms | 93.53 ms | 123.76 ms |
+| direct event → ASCII stdout frame | 15.59 ms | 16.29 ms | 20.07 ms |
+| bridge spawn → server receive | 48.71 ms | 60.86 ms | 88.40 ms |
+| unavailable-avatar fail-open exit | 52.68 ms | 70.79 ms | 80.66 ms |
+
+Measurements stop at avatar stdout. Real Claude hook-emission
+timing and real Windows Terminal compositor/display timing are not
+measured; Sixel rendering is not measured. Full results are in
+[`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md) with raw
+samples in
+[`docs/benchmarks/phase9b-raw.json`](docs/benchmarks/phase9b-raw.json).
+These numbers apply to one machine on one date and are not
+universal results.
 
 What is **not yet validated** and remains pending:
 
 - Real interactive Windows Terminal visual validation (a human
   on Windows 10/11, inside an actual Windows Terminal pane, must
   confirm the avatar appears, animates, and reacts).
-- Latency measurements (Phase 9B). No benchmark numbers are
-  reported in this README until they are measured on a real
-  machine under Phase 9B conditions.
+- Real Claude hook emission latency. The benchmark stops at the
+  boundary where Claude Code would hand the event to the bridge;
+  the time Claude itself takes before firing a hook is outside
+  this measurement.
+- Real Windows Terminal drawing latency (cursor-home erase +
+  redraw under the actual WT scheduler) is outside this
+  measurement.
 - npm publish flow. The package tarball is validated but no
   registry is contacted.
 
@@ -137,9 +162,8 @@ npm run validate:package
 
 The following scripts remain in the repository for developer
 ergonomics but are NOT part of the package's automated validation
-in Phase 9A:
+in Phase 9B:
 
-- `npm run benchmark:bridge` — hand-rolled bridge benchmark.
 - `npm run demo` — interactive state demo.
 
 ## How it works
@@ -270,9 +294,10 @@ commit.
 - The avatar pane is separate from Claude Code's TUI because Claude
   Code does not expose an arbitrary embedded widget slot. This is
   not a workaround — it is the architectural choice the spec made.
-- Latency budgets are pending Phase 9B. Do not rely on the bridge
-  benchmark numbers from older revisions — they have not been
-  re-measured on this codebase yet.
+- The benchmark measures the local production path end to end at
+  the stdout frame boundary. Real Claude hook emission latency and
+  real Windows Terminal redraw scheduling are not part of the
+  measurement; numbers apply to one machine on one date.
 - Sixel rendering requires Chafa and a Sixel-capable terminal.
 - We do not detect hidden reasoning tokens. `think` is inferred
   from lifecycle events only.

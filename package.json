@@ -17,7 +17,7 @@
     "test:unit": "vitest run tests/unit --no-file-parallelism --pool=forks",
     "test:integration": "vitest run tests/integration --no-file-parallelism --pool=forks",
     "test:focused": "vitest run --no-file-parallelism --pool=forks",
-    "benchmark:bridge": "node scripts/benchmark-bridge.mjs",
+    "benchmark:latency": "node scripts/benchmark-latency.mjs",
     "demo": "node scripts/demo-states.mjs",
     "verify:upstream": "node scripts/verify-upstream.mjs",
     "validate:plugin": "claude plugin validate . --strict",
@@ -31,7 +31,8 @@
   "devDependencies": {
     "@types/node": "^20.14.10",
     "typescript": "^5.5.4",
-    "vitest": "^2.0.5"
+    "vitest": "^2.0.5",
+    "yaml": "2.9.0"
   },
   "files": [
     "dist/**/*.js",

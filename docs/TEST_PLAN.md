@@ -25,26 +25,22 @@ tests only.
 | `tests/integration/hook-bridge.test.ts` | The compiled bridge (`dist/claude/hook-bridge.js`) | forwards unmodified payload · exits 0 with missing endpoint · exits 0 with unreachable endpoint · exits 0 with empty stdin · exits 0 with malformed JSON · silent on stderr unless debug · writes stderr with debug |
 | `tests/integration/avatar-server.test.ts` | The compiled avatar process (`dist/host/avatar-process.js`) | /health returns correct instanceId · 404 for unknown paths · SessionStart → hi · PreToolUse:Read → read · Stop → idle · SessionEnd → shutdown · oversized body rejected · malformed JSON rejected · MessageDisplay delta forwarded |
 
-## Bridge benchmark
+## Latency benchmark (Phase 9B)
 
-`scripts/benchmark-bridge.mjs` runs the compiled bridge ≥ 120 times
-against a local test server and reports:
+`scripts/benchmark-latency.mjs` (registered as `npm run benchmark:latency`)
+drives four distinct metrics against the compiled production artifacts:
 
-- `total.p50/p95/p99/mean` — wall-clock from benchmark spawn to child exit
-- `bridge_internal.p50/p95/p99/mean` — time the bridge's own JS spends between `main()` start and exit
+A. Hook-bridge delivery (against a small benchmark HTTP server)
+B. Direct avatar event-to-frame (real avatar, observed frame on stdout)
+C. Full hook-to-frame (real bridge → real avatar → stdout frame)
+D. Hook-bridge fail-open against an unavailable endpoint
 
-The bridge-internal numbers should be well under the spec's 50 ms /
-100 ms targets. The total numbers include `node` process spawn
-overhead, which on Windows is ~80-150 ms and is not under JS control.
-
-## Latency sweep
-
-`scripts/measure-latency.mjs` boots the avatar server, fires every
-fixture through the real bridge, and times the round-trip. Output
-goes to `dist/latency-results.json` and the console.
-
-The script enforces a 300 ms server-side p95 budget and exits non-zero
-if violated.
+Full methodology, acceptance thresholds, and recorded numbers live in
+[`docs/BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md). Raw samples are
+written to [`docs/benchmarks/phase9b-raw.json`](benchmarks/phase9b-raw.json).
+The older `scripts/benchmark-bridge.mjs` and `scripts/measure-latency.mjs`
+have been removed; their percentile and reporting methodology did not
+match the authoritative Phase 9B contract.
 
 ## Vendor verification
 
