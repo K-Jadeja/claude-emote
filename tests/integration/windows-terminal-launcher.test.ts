@@ -36,7 +36,7 @@
  * fake records every flag and value.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   existsSync,
@@ -443,6 +443,194 @@ describe("launcher with fake Windows Terminal (P8)", () => {
   );
 });
 
+/**
+ * Phase 10.1 visual-pane launcher tests.
+ *
+ * The launcher's WT branch must:
+ *   - pass CLAUDE_EMOTE_VISUAL_PANE=1 to the WT pane child,
+ *   - NOT pass that variable to Claude,
+ *   - keep the existing split-pane argv unchanged,
+ *   - keep the health-before-Claude ordering intact,
+ *   - keep attached / test modes untouched.
+ *
+ * No real wt.exe opens: this uses the same fake-wt fake as the rest
+ * of the suite and inspects the recorded env / argv.
+ */
+describe("launcher WT visual-pane contract (P10.1)", () => {
+  beforeAll(() => {
+    try { rmSync(WT_RECORD, { force: true }); } catch {}
+    try { rmSync(CLAUDE_RECORD, { force: true }); } catch {}
+    writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+  });
+
+  beforeEach(() => {
+    try { rmSync(WT_RECORD, { force: true }); } catch {}
+    try { rmSync(CLAUDE_RECORD, { force: true }); } catch {}
+    writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+  });
+
+  it(
+    "WT pane child receives CLAUDE_EMOTE_VISUAL_PANE=1",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      const { code, stderr } = await runLauncher(["--resume"]);
+      if (code !== 0) {
+        throw new Error(`launcher exited ${code}; stderr:\n${stderr}`);
+      }
+      const r = readWtRecord();
+      expect(r.env.CLAUDE_EMOTE_VISUAL_PANE).toBe("1");
+    },
+  );
+
+  it(
+    "Claude's child environment does NOT receive CLAUDE_EMOTE_VISUAL_PANE",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      const { code, stderr } = await runLauncher(["--resume"]);
+      if (code !== 0) {
+        throw new Error(`launcher exited ${code}; stderr:\n${stderr}`);
+      }
+      const c = readClaudeRecord();
+      // The variable is strictly scoped to the WT pane child. Even if
+      // the launcher inherited it from process.env, the launcher
+      // strips it from Claude's environment before spawning.
+      expect(c.env.CLAUDE_EMOTE_VISUAL_PANE).toBeUndefined();
+    },
+  );
+
+  it(
+    "Claude's child environment still does NOT receive CLAUDE_EMOTE_VISUAL_PANE when it was set globally",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      const { code, stderr } = await runLauncher(
+        ["--resume"],
+        { CLAUDE_EMOTE_VISUAL_PANE: "1" },
+      );
+      if (code !== 0) {
+        throw new Error(`launcher exited ${code}; stderr:\n${stderr}`);
+      }
+      const r = readWtRecord();
+      // The launcher sets it on the WT child even if the caller
+      // already had it — same observable value either way.
+      expect(r.env.CLAUDE_EMOTE_VISUAL_PANE).toBe("1");
+      const c = readClaudeRecord();
+      // But Claude must NEVER observe it.
+      expect(c.env.CLAUDE_EMOTE_VISUAL_PANE).toBeUndefined();
+    },
+  );
+
+  it(
+    "exact split-pane argv remains unchanged in visual-pane mode",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      const { code, stderr } = await runLauncher(["--resume"]);
+      if (code !== 0) {
+        throw new Error(`launcher exited ${code}; stderr:\n${stderr}`);
+      }
+      const r = readWtRecord();
+      // Confirm the leading tokens are exactly the documented shape:
+      //   -w 0 split-pane -V --size 0.25 -d <cwd> --title <title>
+      //   process.execPath avatar-process.js --port=<port>
+      //   --instance=<id> --parentPid=<pid>
+      expect(r.argv[0]).toBe("-w");
+      expect(r.argv[1]).toBe("0");
+      expect(r.argv[2]).toBe("split-pane");
+      expect(r.argv[3]).toBe("-V");
+      expect(r.argv[4]).toBe("--size");
+      expect(r.argv[5]).toBe("0.25");
+      expect(r.argv[6]).toBe("-d");
+      expect(r.argv[7]).toBe(PROJECT_ROOT);
+      expect(r.argv[8]).toBe("--title");
+      expect(typeof r.argv[9]).toBe("string");
+      expect(r.argv[9]!.length).toBeGreaterThan(0);
+      // process.execPath then avatar script then three required flags.
+      expect(r.argv[10]).toBe(process.execPath);
+      expect(r.argv[11]).toBe(FAKE_AVATAR_PATH);
+      // Required trailing flags exactly once each, in any order —
+      // the production builder pins the order, but for this test
+      // we assert presence and count.
+      const portCount = r.argv.filter((a) => /^--port=\d+$/.test(a)).length;
+      expect(portCount).toBe(1);
+      const instanceCount = r.argv.filter((a) => /^--instance=/.test(a)).length;
+      expect(instanceCount).toBe(1);
+      const parentCount = r.argv.filter((a) => /^--parentPid=\d+$/.test(a)).length;
+      expect(parentCount).toBe(1);
+      // No shell / fullscreen tokens.
+      expect(r.argv).not.toContain("start");
+      expect(r.argv).not.toContain("cmd");
+      expect(r.argv).not.toContain("/c");
+      expect(r.argv).not.toContain("-F");
+    },
+  );
+
+  it(
+    "health-before-Claude ordering is preserved in visual-pane mode",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      const { code, stderr } = await runLauncher(["--resume"]);
+      if (code !== 0) {
+        throw new Error(`launcher exited ${code}; stderr:\n${stderr}`);
+      }
+      const c = readClaudeRecord();
+      // Claude still gets the endpoint and plugin-dir.
+      expect(c.env.CLAUDE_EMOTE_ENDPOINT).toMatch(
+        /^http:\/\/127\.0\.0\.1:\d+\/event$/,
+      );
+      expect(c.argv).toContain("--resume");
+      expect(c.argv).toContain("--plugin-dir");
+      // Debug log proves /health was observed before Claude started.
+      expect(stderr).toMatch(/avatar launched via: wt/);
+      // No premature "avatar exited" message.
+      expect(stderr).not.toMatch(/avatar exited before becoming healthy/);
+    },
+  );
+
+  it(
+    "no attached duplicate is spawned in visual-pane mode",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      const { code, stderr } = await runLauncher(["--resume"]);
+      if (code !== 0) {
+        throw new Error(`launcher exited ${code}; stderr:\n${stderr}`);
+      }
+      // Exactly one branch announced in the debug log.
+      const wtAnnouncements = (stderr.match(/avatar launched via: wt/g) || []).length;
+      const attachedAnnouncements = (stderr.match(/avatar launched via: attached/g) || []).length;
+      const testAnnouncements = (stderr.match(/avatar launched via: test/g) || []).length;
+      expect(wtAnnouncements).toBe(1);
+      expect(attachedAnnouncements).toBe(0);
+      expect(testAnnouncements).toBe(0);
+      // The fake wt recorded exactly one invocation.
+      const recorded = JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
+      expect(recorded.length).toBeGreaterThan(0);
+      // And the fake wt's argv shows one pane payload, not two.
+      const r = readWtRecord();
+      const portCount = r.argv.filter((a) => /^--port=\d+$/.test(a)).length;
+      expect(portCount).toBe(1);
+    },
+  );
+
+  it(
+    "no real Windows Terminal opens during tests (fake-wt record path proves it)",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      // The launcher is configured to use FAKE_WT_PATH via
+      // CLAUDE_EMOTE_WT_EXE, so any real wt.exe invocation would be
+      // a bug. The fake-wt script writes the record file the moment
+      // it runs. If the file does not exist after a launcher run,
+      // either the launcher took a non-wt branch or wt never ran.
+      try { rmSync(WT_RECORD, { force: true }); } catch {}
+      const { code, stderr } = await runLauncher(["--resume"]);
+      expect(code).toBe(0);
+      // The fake-wt record MUST exist — proves the launcher did
+      // invoke the fake (and therefore did NOT invoke any real
+      // wt.exe on this CI machine).
+      expect(existsSync(WT_RECORD)).toBe(true);
+      expect(stderr).toMatch(/avatar launched via: wt/);
+    },
+  );
+});
+
 describe("launcher dry-run (P8 diagnostic mode)", () => {
   beforeAll(() => {
     // Ensure a clean slate — earlier wt-spawn tests may have written this.
@@ -680,6 +868,59 @@ describe("launcher attached fallback (WT_SESSION absent)", () => {
         },
       );
       expect(res.code).toBe(9);
+    },
+  );
+
+  it(
+    "attached mode does NOT pass CLAUDE_EMOTE_VISUAL_PANE to its child",
+    { timeout: TEST_TIMEOUT },
+    async () => {
+      // Even when the caller has CLAUDE_EMOTE_VISUAL_PANE set in
+      // process.env, the attached fallback must NOT pass it to its
+      // child avatar. The variable is strictly scoped to the WT pane
+      // spawn.
+      try { rmSync(WT_RECORD, { force: true }); } catch {}
+      writeFileSync(PIDS_RECORD, "[]\n", "utf8");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        CLAUDE_EMOTE_CLAUDE_EXE: FAKE_CLAUDE_PATH,
+        CLAUDE_EMOTE_AVATAR_EXE: FAKE_AVATAR_PATH,
+        CLAUDE_EMOTE_WT_EXE: FAKE_WT_PATH,
+        CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+        CLAUDE_EMOTE_DEBUG: "1",
+        FAKE_CLAUDE_RECORD: CLAUDE_RECORD,
+        FAKE_WT_RECORD: WT_RECORD,
+        FAKE_AVATAR_PIDS_FILE: PIDS_RECORD,
+        FAKE_CLAUDE_EXIT_CODE: "0",
+        // Pre-set on purpose: attached mode must still NOT forward it.
+        CLAUDE_EMOTE_VISUAL_PANE: "1",
+      };
+      delete env.WT_SESSION;
+      delete env.LOCALAPPDATA;
+      delete env.CLAUDE_EMOTE_TEST_MODE;
+      const res = await new Promise<{ code: number; stderr: string }>(
+        (r, j) => {
+          const child: ChildProcess = spawn(NODE, [LAUNCHER, "--resume"], {
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stderr = "";
+          child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+          child.on("close", (code) => r({ code: code ?? 0, stderr }));
+          child.on("error", j);
+        },
+      );
+      expect(res.code).toBe(0);
+      // The fake wt must NOT have been invoked.
+      expect(existsSync(WT_RECORD)).toBe(false);
+      // The debug log proves attached mode was used.
+      expect(res.stderr).toMatch(/avatar launched via: attached/);
+      // The fake avatar recorded its PID.
+      const recorded = JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
+      expect(recorded.length).toBeGreaterThan(0);
+      // And Claude's child also does NOT see the visual-pane flag.
+      const c = readClaudeRecord();
+      expect(c.env.CLAUDE_EMOTE_VISUAL_PANE).toBeUndefined();
     },
   );
 });

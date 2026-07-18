@@ -42,6 +42,7 @@ import {
   showCursor,
   cursorHome,
   eraseLines,
+  clearPane,
 } from "./terminal-output.js";
 
 const REDRAW_DEBOUNCE_MS = 8;
@@ -66,6 +67,15 @@ export class StandaloneRenderHost {
   private lastTextRows = 0;
   private started = false;
   private stopped = false;
+  /**
+   * Phase 10.1 visual-pane surface initialization flag. When set,
+   * the next redrawNow() first emits a clear-pane + cursor-home
+   * sequence so any pre-existing text (the wrap-prone diagnostic
+   * rows from the avatar-process startup) is erased before the
+   * renderer takes ownership of the pane. The flag is then cleared
+   * so subsequent redraws use the normal erase-N-lines path.
+   */
+  private surfaceClearPending = false;
   private readonly silent: boolean;
   private readonly sink?: (frame: RenderedFrame) => void;
 
@@ -122,6 +132,15 @@ export class StandaloneRenderHost {
       return;
     }
 
+    if (this.surfaceClearPending) {
+      // Visual-pane initialization. Emitted before the cursor-home
+      // so the pane is fully cleared first; this guarantees the
+      // wrap-prone diagnostic rows from startup are erased before
+      // the renderer takes ownership.
+      clearPane();
+      this.surfaceClearPending = false;
+      this.lastTextRows = 0;
+    }
     cursorHome();
     if (frame.kind === "text") {
       eraseLines(this.lastTextRows);
@@ -169,6 +188,20 @@ export class StandaloneRenderHost {
     if (this.started) return;
     this.started = true;
     if (!this.silent) hideCursor();
+  }
+
+  /**
+   * Phase 10.1: schedule a one-time clear-pane + cursor-home that
+   * fires before the next redrawNow(). Idempotent. The clearing
+   * happens at the renderer boundary (not in the policy) so the
+   * contract stays narrow and the rest of the renderer pipeline is
+   * unchanged. Calling this on a stopped or silent host is a no-op.
+   */
+  initializeVisualSurface(): void {
+    if (this.stopped) return;
+    if (this.silent) return;
+    if (this.surfaceClearPending) return;
+    this.surfaceClearPending = true;
   }
 
   /** Restore the terminal to a sane state. Idempotent. */

@@ -91,6 +91,63 @@ bundled-ASCII startup retry. Full numbers from the prior
 benchmark still live in
 [`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md).
 
+## Status (Phase 10.1)
+
+Phase 10.1 is a narrow repair for the corrupted-output pattern
+observed in the real Windows Terminal pane: the narrow right pane
+was displaying the fallback warning, the `CLAUDE_EMOTE_READY`
+marker, and long installed-package paths before the renderer
+could take ownership. Because those lines are wrap-prone in a
+25%-width pane and the renderer only repaints over its own frame
+row count, the cursor-relative redraw eventually overlapped the
+wrapped startup text, producing merged output like
+`(• ◡ •)enderer could not pr...`.
+
+Phase 10.1 introduces an explicit **visual-pane output mode** that
+the launcher activates only for the WT pane child:
+
+- The launcher passes `CLAUDE_EMOTE_VISUAL_PANE=1` to the WT pane
+  child only. It is not added to Claude's environment; it is not
+  set for the attached or test branches; the split-pane argv is
+  unchanged.
+- In visual-pane mode the avatar's output policy suppresses every
+  non-frame operational line — READY, fallback warning, debug
+  diagnostics, avatar-server event logs, port / instance /
+  emote-directory messages — from stdout / stderr. The pane is
+  treated as an exclusive render area.
+- Before the first frame, the renderer emits exactly one
+  `\x1b[2J\x1b[H` clear-pane + cursor-home sequence. Subsequent
+  redraws use the normal erase-N-lines path; the renderer owns the
+  frame area from then on.
+- Readiness is observed exclusively through `/health`, which the
+  launcher already polls. The READY marker is not consumed by the
+  launcher in any mode; this was always an external convenience.
+- When `CLAUDE_EMOTE_LOG_FILE` is configured, suppressed
+  diagnostics still land in the log file so operators can debug a
+  real Windows Terminal run without paying the visual-corruption
+  cost.
+- Attached / test / validation modes retain their full diagnostic
+  output — READY on stdout, the fallback warning on stderr,
+  installed paths on the READY line. The new contract is opt-in.
+- Fatal startup errors in visual-pane mode may still print one
+  concise line because no usable renderer exists in that case.
+
+Phase 10.1 does not change the Phase 9B benchmark values. The
+benchmark targets the avatar stdout frame boundary and the
+attached-mode output paths; visual-pane mode suppresses bytes
+the benchmark never measures. Full results still live in
+[`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md).
+
+### What still requires real-machine validation
+
+- Real interactive Windows Terminal visual validation must be
+  rerun after this fix. The automated tests prove the output
+  policy, the launcher environment wiring, the surface
+  initialization, and the installed-package smoke; a human on
+  Windows 10/11 inside an actual Windows Terminal pane must
+  confirm the avatar now appears cleanly, without the merged
+  `(• ◡ •)enderer could not pr...` corruption pattern.
+
 ### Windows Terminal discovery
 
 Windows Terminal discovery now supports the AppX execution
@@ -268,6 +325,8 @@ launcher also honours these environment variables:
 | `CLAUDE_EMOTE_CHAFA_PATH` | Path to `chafa.exe` for Sixel rendering. |
 | `CLAUDE_EMOTE_EMOTE_DIR` | Override the emote-set directory. |
 | `CLAUDE_EMOTE_DATA_DIR` | Override the per-user data dir (default `~/.claude-emote`). |
+| `CLAUDE_EMOTE_LOG_FILE` | Optional persistent log path; suppressed visual-pane diagnostics still land here. |
+| `CLAUDE_EMOTE_VISUAL_PANE` | Set to `1` only for the WT pane child; suppresses non-frame output and switches readiness to `/health`. |
 | `PI_EMOTE_CHAFA_PATH` | Backwards-compatible Chafa path (V1 also reads this). |
 | `WT_SESSION` | Set by Windows Terminal; the launcher reads it to confirm pane mode. |
 

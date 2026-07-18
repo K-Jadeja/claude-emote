@@ -435,6 +435,16 @@ process.exit(code);
       check(name, ok, detail ?? "");
     }
 
+    // ---- installed Phase 10.1 visual-pane smoke (real package) ----
+    console.log("[visual-pane smoke] preferred-image renderer + missing Chafa → bundled ASCII, pane stays clean");
+    const visualPaneSmoke = await runInstalledVisualPaneSmoke(
+      installedRoot,
+      installDir,
+    );
+    for (const [name, ok, detail] of visualPaneSmoke) {
+      check(name, ok, detail ?? "");
+    }
+
     // ---- plugin validate (installed root) ---------------------
     console.log("[plugin] claude plugin validate (installed root, strict)");
     const pluginRes = await run(
@@ -746,6 +756,263 @@ main().catch((err) => {
   console.error("validate-package: fatal:", err.message || err);
   process.exit(1);
 });
+
+/**
+ * Phase 10.1 installed visual-pane smoke (real package).
+ *
+ * Spawn the installed <root>/dist/host/avatar-process.js with
+ *   - an unrelated tmp cwd
+ *   - a project config selecting the image protocol
+ *   - PATH emptied so Chafa cannot be located
+ *   - LOCALAPPDATA redirected so any WinGet scan also sees nothing
+ *   - CLAUDE_EMOTE_CHAFA_PATH and PI_EMOTE_CHAFA_PATH cleared
+ *   - CLAUDE_EMOTE_VISUAL_PANE=1 so the pane surface is
+ *     exclusive to frames
+ *   - CLAUDE_EMOTE_LOG_FILE=<path> so the test can read the
+ *     suppressed READY marker and learn the bound port
+ *
+ * The smoke proves:
+ *   - /health returns 200 (readiness via /health, not via READY)
+ *   - the bundled ASCII think frame appears on stdout after a
+ *     UserPromptSubmit POST
+ *   - the bundled ASCII idle frame appears on stdout after Stop
+ *   - the pane stdout / stderr do NOT contain CLAUDE_EMOTE_READY
+ *   - the pane stdout / stderr do NOT contain the fallback warning
+ *   - the pane stdout / stderr do NOT contain installed emote paths
+ *   - the pane stdout contains exactly one \x1b[2J\x1b[H
+ *     clear+home sequence that precedes the first frame
+ *   - the installed child exits cleanly and no PID remains
+ */
+async function runInstalledVisualPaneSmoke(installedRoot, installDir) {
+  const checks = [];
+  const tmpCwd = mkdtempSync(join(installDir, "visual-pane-smoke-cwd-"));
+  const tmpLocalAppData = mkdtempSync(join(installDir, "visual-pane-smoke-lad-"));
+  const projCfgDir = join(
+    tmpCwd,
+    ".claude-emote",
+    "extensions",
+    "claude-emote",
+  );
+  mkdirSync(projCfgDir, { recursive: true });
+  writeFileSync(
+    join(projCfgDir, "config.json"),
+    JSON.stringify({ terminals: [{ match: "unknown", render: "sixel" }] }),
+    "utf8",
+  );
+  const logFile = join(tmpCwd, "visual-pane-smoke.log");
+
+  const cleanEnv = { ...process.env };
+  for (const k of [
+    "WT_SESSION", "TERM_PROGRAM", "ITERM_SESSION_ID",
+    "KITTY_WINDOW_ID", "WEZTERM_PANE", "GHOSTTY_RESOURCES_DIR",
+    "TMUX", "ZELLIJ_SESSION_NAME", "ZELLIJ",
+    "CLAUDE_EMOTE_PORT", "CLAUDE_EMOTE_INSTANCE_ID",
+    "CLAUDE_EMOTE_EMOTE_DIR", "CLAUDE_EMOTE_PARENT_PID",
+    "CLAUDE_EMOTE_LOG_FILE", "CLAUDE_EMOTE_DEBUG",
+    "CLAUDE_EMOTE_DEMO_PROTOCOL",
+    "CLAUDE_EMOTE_CHAFA_PATH", "PI_EMOTE_CHAFA_PATH",
+  ]) delete cleanEnv[k];
+  cleanEnv.PATH = tmpCwd;
+  cleanEnv.LOCALAPPDATA = tmpLocalAppData;
+  cleanEnv.CLAUDE_EMOTE_VISUAL_PANE = "1";
+  cleanEnv.CLAUDE_EMOTE_LOG_FILE = logFile;
+
+  const avatarScript = join(installedRoot, "dist", "host", "avatar-process.js");
+  const child = spawn(
+    NODE,
+    [avatarScript, "--port=0", "--instance=visual-pane-installed"],
+    { env: cleanEnv, stdio: ["ignore", "pipe", "pipe"], cwd: tmpCwd },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (b) => (stdout += b.toString("utf8")));
+  child.stderr?.on("data", (b) => (stderr += b.toString("utf8")));
+
+  /**
+   * Drain a request response fully (including the body) and resolve
+   * with the status code.
+   */
+  const drainRequest = (port, path, method, body) =>
+    new Promise((res) => {
+      const opts = {
+        host: "127.0.0.1",
+        port,
+        path,
+        method,
+        timeout: 2000,
+      };
+      if (body) {
+        opts.headers = {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+        };
+      }
+      const req = request(opts, (r) => {
+        r.on("data", () => {});
+        r.on("end", () => res(r.statusCode ?? 0));
+        r.on("error", () => res(-1));
+      });
+      req.on("error", () => res(-1));
+      req.on("timeout", () => { req.destroy(); res(-1); });
+      if (body) req.write(body);
+      req.end();
+    });
+
+  let readyPort = 0;
+
+  try {
+    // Wait for the suppressed READY to land in the log file.
+    const readyDeadline = Date.now() + 8000;
+    while (Date.now() < readyDeadline) {
+      if (existsSync(logFile)) {
+        const text = readFileSync(logFile, "utf8");
+        const pm = text.match(/CLAUDE_EMOTE_READY[^\n]*port=(\d+)/);
+        if (pm) {
+          readyPort = Number(pm[1]);
+          break;
+        }
+      }
+      if (child.exitCode !== null) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    checks.push([
+      "visual-pane READY appeared in log file (suppressed from stdout)",
+      readyPort > 0,
+      `port=${readyPort}`,
+    ]);
+
+    if (readyPort > 0) {
+      const healthCode = await drainRequest(readyPort, "/health", "GET");
+      checks.push([
+        "visual-pane /health returns 200 (readiness via /health)",
+        healthCode === 200,
+        `code=${healthCode}`,
+      ]);
+
+      // Think frame.
+      const stdoutBeforeThink = stdout.length;
+      const thinkEvent = JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "visual-pane-installed",
+        prompt: "vp",
+      });
+      const postCode = await drainRequest(
+        readyPort,
+        "/event",
+        "POST",
+        thinkEvent,
+      );
+      checks.push(["visual-pane POST /event returns 200", postCode === 200]);
+      const thinkFrame = "(•_ • )?";
+      const thinkDeadline = Date.now() + 4000;
+      let thinkSeen = false;
+      while (Date.now() < thinkDeadline) {
+        if (stdout.slice(stdoutBeforeThink).includes(thinkFrame)) {
+          thinkSeen = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      checks.push([
+        "visual-pane ASCII think frame emitted after POST",
+        thinkSeen,
+        stdout.slice(-200),
+      ]);
+
+      // Idle frame.
+      const stdoutBeforeStop = stdout.length;
+      const stopEvent = JSON.stringify({
+        hook_event_name: "Stop",
+        session_id: "visual-pane-installed",
+      });
+      const stopCode = await drainRequest(
+        readyPort,
+        "/event",
+        "POST",
+        stopEvent,
+      );
+      checks.push(["visual-pane Stop POST returns 200", stopCode === 200]);
+      const idleFrame = "(• ◡ •)";
+      const stopDeadline = Date.now() + 4000;
+      let idleSeen = false;
+      while (Date.now() < stopDeadline) {
+        if (stdout.slice(stdoutBeforeStop).includes(idleFrame)) {
+          idleSeen = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      checks.push(["visual-pane ASCII idle frame emitted after Stop", idleSeen]);
+    }
+  } finally {
+    try { child.kill("SIGTERM"); } catch {}
+    await new Promise((res) => {
+      const t = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch {}
+        res();
+      }, 5_000);
+      child.once("close", () => { clearTimeout(t); res(); });
+    });
+    let alive = false;
+    try { process.kill(child.pid, 0); alive = true; } catch {}
+    checks.push([
+      "visual-pane installed child exited cleanly",
+      !alive,
+      `pid=${child.pid}`,
+    ]);
+    checks.push([
+      "visual-pane pane stdout does NOT contain CLAUDE_EMOTE_READY",
+      !stdout.includes("CLAUDE_EMOTE_READY"),
+      stdout.slice(-200),
+    ]);
+    checks.push([
+      "visual-pane pane stdout does NOT contain emote paths",
+      !/emoteDir=/.test(stdout),
+      stdout.slice(-200),
+    ]);
+    checks.push([
+      "visual-pane pane stderr does NOT contain fallback warning",
+      !/falling back to bundled ASCII/i.test(stderr),
+      stderr.slice(-200),
+    ]);
+    checks.push([
+      "visual-pane pane stderr does NOT contain installed paths",
+      !/emoteDir=/.test(stderr),
+      stderr.slice(-200),
+    ]);
+    checks.push([
+      "visual-pane pane stderr does NOT contain avatar-server / avatar-process diagnostic tags",
+      !/\[avatar-(server|process)\]/.test(stderr),
+      stderr.slice(-200),
+    ]);
+    const clearCount = (stdout.match(/\x1b\[2J\x1b\[H/g) || []).length;
+    checks.push([
+      "visual-pane clear+home precedes the first frame (exactly once)",
+      clearCount === 1,
+      `clearCount=${clearCount}`,
+    ]);
+    // The clear sequence must come BEFORE the first frame payload.
+    const clearIdx = stdout.indexOf("\x1b[2J\x1b[H");
+    const frameIdx = stdout.indexOf("(• ◡ •)");
+    checks.push([
+      "visual-pane clear+home precedes the first idle frame",
+      clearIdx >= 0 && (frameIdx < 0 || clearIdx < frameIdx),
+      `clearIdx=${clearIdx} frameIdx=${frameIdx}`,
+    ]);
+    // The log file retained the suppressed READY so operators can
+    // still debug readiness from a real Windows Terminal run.
+    checks.push([
+      "visual-pane log file contains the suppressed READY marker",
+      existsSync(logFile) && readFileSync(logFile, "utf8").includes("CLAUDE_EMOTE_READY"),
+      logFile,
+    ]);
+
+    try { rmSync(tmpCwd, { recursive: true, force: true }); } catch {}
+    try { rmSync(tmpLocalAppData, { recursive: true, force: true }); } catch {}
+  }
+
+  return checks;
+}
 
 /**
  * Phase 10 / Defect B installed-fallback smoke.

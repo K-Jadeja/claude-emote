@@ -9,28 +9,17 @@
  *   - Bound only to 127.0.0.1.
  *   - Rejects bodies larger than MAX_BODY_BYTES.
  *   - Never throws to the caller — every handler returns JSON.
- *   - Logs to stderr only when CLAUDE_EMOTE_DEBUG=1.
+ *   - All diagnostic logging goes through the supplied
+ *     `AvatarOutputPolicy` so the visual-pane contract can suppress
+ *     event-log writes from the writing surface.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { writeFileSync, appendFileSync } from "node:fs";
 import { mapEventSafe, type AvatarReaction } from "../claude/event-mapper.js";
+import type { AvatarOutputPolicy } from "./output-policy.js";
 
 const MAX_BODY_BYTES = 256 * 1024; // matches bridge contract.
 const REQUEST_TIMEOUT_MS = 5_000;
-const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
-const LOG_FILE = process.env.CLAUDE_EMOTE_LOG_FILE; // optional persistent log
-
-function dbg(msg: string): void {
-  if (debug) process.stderr.write(`[avatar-server] ${msg}\n`);
-  if (LOG_FILE) {
-    try {
-      appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`);
-    } catch {
-      // Best effort.
-    }
-  }
-}
 
 export interface AvatarServerOptions {
   instanceId: string;
@@ -39,6 +28,16 @@ export interface AvatarServerOptions {
   onEvent: (reaction: AvatarReaction, rawEvent: unknown) => void;
   /** Called for every accepted event with the raw event for talk-token forwarding. */
   onMessageDisplayDelta?: (content: string) => void;
+  /**
+   * Output policy for every diagnostic the server emits. When the
+   * server runs inside a Windows Terminal visual pane the policy
+   * suppresses the event-log writes from the writing surface; when
+   * it runs in attached / test / validation modes the policy
+   * forwards them to stderr exactly as before. The policy is
+   * mandatory so the server never reaches for
+   * process.stdout / process.stderr directly.
+   */
+  policy: AvatarOutputPolicy;
 }
 
 export interface AvatarServer {
@@ -129,18 +128,20 @@ export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
         ) {
           opts.onMessageDisplayDelta(reaction.talkToken);
         }
-        dbg(
-          `event: name=${(body as { hook_event_name?: string })?.hook_event_name ?? "?"} reaction=${JSON.stringify(reaction)}`,
+        opts.policy.writeDiagnostic(
+          `[avatar-server] event: name=${(body as { hook_event_name?: string })?.hook_event_name ?? "?"} reaction=${JSON.stringify(reaction)}\n`,
         );
         return writeJson(res, 200, { ok: true, reaction });
       } catch (err) {
-        dbg(`onEvent threw: ${(err as Error).message}`);
+        opts.policy.writeDiagnostic(
+          `[avatar-server] onEvent threw: ${(err as Error).message}\n`,
+        );
         return writeJson(res, 500, { ok: false, error: "internal" });
       }
     });
 
     server.on("error", (err) => {
-      dbg(`server error: ${err.message}`);
+      opts.policy.writeDiagnostic(`[avatar-server] server error: ${err.message}\n`);
       reject(err);
     });
 
@@ -153,18 +154,7 @@ export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
       opts.port = actualPort;
       const port = actualPort;
       const url = `http://127.0.0.1:${port}`;
-      dbg(`listening on ${url}`);
-      if (LOG_FILE) {
-        try {
-          writeFileSync(
-            LOG_FILE,
-            `[${new Date().toISOString()}] server up at ${url} instance=${opts.instanceId}\n`,
-            { flag: "a" },
-          );
-        } catch {
-          // ignore
-        }
-      }
+      opts.policy.writeDiagnostic(`[avatar-server] listening on ${url}\n`);
       resolve({
         server,
         port,

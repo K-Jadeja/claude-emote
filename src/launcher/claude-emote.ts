@@ -318,11 +318,23 @@ async function main(): Promise<void> {
     const spawnArgs = isNodeScript
       ? [candidateWtExe, ...wtArgs]
       : wtArgs;
+    // Phase 10.1 visual-pane contract: the WT pane child receives
+    // CLAUDE_EMOTE_VISUAL_PANE=1 so its writing surface is treated
+    // as an exclusive render area (no READY, no fallback warning,
+    // no debug logs, no installed-package paths in the pane).
+    // Readiness is observed through /health instead. This env is
+    // NOT added to the Claude child's environment below; it is
+    // strictly scoped to the WT pane spawn.
+    const wtSpawnEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      CLAUDE_EMOTE_VISUAL_PANE: "1",
+    };
     const wtChild = spawn(spawnExe, spawnArgs, {
       shell: false,
       detached: false,
       stdio: "ignore",
       windowsHide: true,
+      env: wtSpawnEnv,
     });
 
     // Observe the wt spawn outcome asynchronously so a wt-side spawn
@@ -458,6 +470,11 @@ async function main(): Promise<void> {
     CLAUDE_EMOTE_ENDPOINT: endpoint,
     CLAUDE_EMOTE_PARENT_PID: String(process.pid),
   };
+  // Phase 10.1: the visual-pane flag is strictly scoped to the WT
+  // pane child. Strip it from Claude's environment even if the
+  // caller had it set globally, so Claude (and its hooks) never
+  // observe a value meant only for the avatar pane.
+  delete childEnv.CLAUDE_EMOTE_VISUAL_PANE;
 
   const finalClaudeArgs = buildClaudeArgs(claudeArgs, PROJECT_ROOT);
   dbg(`claude argv: ${finalClaudeArgs.join(" ")}`);

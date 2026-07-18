@@ -36,6 +36,14 @@
  * Environment variables:
  *   CLAUDE_EMOTE_DEBUG=1          — verbose stderr logging
  *   CLAUDE_EMOTE_LOG_FILE=<path>  — optional persistent log file
+ *   CLAUDE_EMOTE_VISUAL_PANE=1    — Phase 10.1: the launcher passes
+ *                                   this only to the WT pane child;
+ *                                   all non-frame writes are
+ *                                   suppressed from stdout / stderr
+ *                                   and readiness is observed via
+ *                                   /health instead of a READY
+ *                                   marker. Fatal startup errors may
+ *                                   still print one concise line.
  */
 
 import { startServer, type AvatarServer } from "./avatar-server.js";
@@ -64,10 +72,34 @@ import {
   buildProductionRendererStartupDeps,
   type RendererStartupDeps,
 } from "./renderer-startup.js";
+import {
+  createAvatarOutputPolicy,
+  type AvatarOutputPolicy,
+} from "./output-policy.js";
 
 async function main(): Promise<void> {
   const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
   setDebug(debug);
+
+  // --- Phase 10.1 visual-pane contract.
+  //
+  // When the launcher spawned this avatar inside a Windows
+  // Terminal pane it passes CLAUDE_EMOTE_VISUAL_PANE=1 to the
+  // pane child. The writing surface then becomes an exclusive
+  // render area: every non-frame write (READY, fallback warning,
+  // debug diagnostics, server event logs, port / instance /
+  // emote-directory messages) is suppressed from stdout / stderr
+  // so the pane stays clean. Readiness is observed through
+  // /health (the launcher already polls it). The single fatal
+  // startup path may still write one concise line because no
+  // usable renderer exists in that case.
+  const visualPane = process.env.CLAUDE_EMOTE_VISUAL_PANE === "1";
+  const logFile = process.env.CLAUDE_EMOTE_LOG_FILE;
+  const policy: AvatarOutputPolicy = createAvatarOutputPolicy({
+    visualPane,
+    debug,
+    logFile,
+  });
 
   // --- Parse configuration first. On failure, exit cleanly without
   // touching the renderer or binding an HTTP server. ---
@@ -81,18 +113,16 @@ async function main(): Promise<void> {
         : err instanceof Error
           ? err.message
           : String(err);
-    process.stderr.write(`[avatar-process] invalid configuration: ${msg}\n`);
+    policy.writeFatal(`[avatar-process] invalid configuration: ${msg}\n`);
     process.exit(2);
     return;
   }
 
   const { instanceId, port, emoteDir, parentPid } = options;
 
-  if (debug) {
-    process.stderr.write(
-      `[avatar-process] instance=${instanceId} port=${port} emoteDir=${emoteDir === "" ? "<automatic>" : emoteDir} parent=${parentPid ?? "null"}\n`,
-    );
-  }
+  policy.writeDiagnostic(
+    `[avatar-process] instance=${instanceId} port=${port} emoteDir=${emoteDir === "" ? "<automatic>" : emoteDir} parent=${parentPid ?? "null"}\n`,
+  );
 
   // --- Load config and resolve the renderer kind BEFORE picking the
   // emote directory. This way the bundled-path policy knows whether to
@@ -113,16 +143,14 @@ async function main(): Promise<void> {
     emoteDir,
     rendererKind,
   );
-  if (debug) {
-    process.stderr.write(
-      `[avatar-process] emote selection: kind=${selection.kind} dir=${selection.directory}\n`,
-    );
-  }
+  policy.writeDiagnostic(
+    `[avatar-process] emote selection: kind=${selection.kind} dir=${selection.directory}\n`,
+  );
 
   // --- Validate the directory against the chosen renderer kind. ---
   const validation = validateEmoteDirectory(selection.directory, rendererKind);
   if (!validation.ok) {
-    process.stderr.write(
+    policy.writeFatal(
       `[avatar-process] invalid emote set${
         selection.kind === "custom" ? "" : " (bundled)"
       } for ${rendererKind} renderer: ${validation.reason}\n`,
@@ -130,8 +158,8 @@ async function main(): Promise<void> {
     process.exit(3);
     return;
   }
-  if (validation.reason && debug) {
-    process.stderr.write(
+  if (validation.reason) {
+    policy.writeDiagnostic(
       `[avatar-process] emote set warning: ${validation.reason}\n`,
     );
   }
@@ -154,24 +182,35 @@ async function main(): Promise<void> {
     deps,
     bundledAsciiDirectory: BUNDLED_ASCII_EMOTE_DIR,
     validateEmoteDirectory,
-    onFallbackWarning: (msg) => process.stderr.write(msg),
+    onFallbackWarning: (msg) => policy.writeWarning(msg),
   });
 
   if (!started.ok) {
-    process.stderr.write(
-      `[avatar-process] ${started.reason}\n`,
-    );
+    policy.writeFatal(`[avatar-process] ${started.reason}\n`);
     process.exit(4);
     return;
   }
 
   const { renderer, resolved, host, animator, selection: chosenSelection } =
     started.runtime;
-  if (debug) {
-    process.stderr.write(
-      `[avatar-process] terminal=${detectTerminalName()} protocol=${resolved.protocol} multiplexer=${resolved.multiplexer ?? "(none)"}\n`,
-    );
-    if (resolved.warning) process.stderr.write(`[avatar-process] ${resolved.warning}\n`);
+  policy.writeDiagnostic(
+    `[avatar-process] terminal=${detectTerminalName()} protocol=${resolved.protocol} multiplexer=${resolved.multiplexer ?? "(none)"}\n`,
+  );
+  if (resolved.warning) {
+    policy.writeWarning(`[avatar-process] ${resolved.warning}\n`);
+  }
+
+  // --- Phase 10.1: one-time visual-pane surface initialization.
+  //
+  // The host has already scheduled its first redraw (inside
+  // attemptRendererStartup → attachFrameSource). We mark the host
+  // for a one-time clear-pane + cursor-home so the first redraw
+  // erases any pre-existing pane content (the wrap-prone
+  // diagnostic rows from earlier startup steps) before drawing the
+  // frame. Subsequent redraws use the normal erase-N-lines path;
+  // the renderer owns the frame area from then on.
+  if (visualPane) {
+    host.initializeVisualSurface();
   }
 
   // --- State controller (Phase 7) -------------------------------------------
@@ -205,7 +244,7 @@ async function main(): Promise<void> {
   async function shutdown(reason: string): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
-    if (debug) process.stderr.write(`[avatar-process] shutdown: ${reason}\n`);
+    policy.writeDiagnostic(`[avatar-process] shutdown: ${reason}\n`);
     try {
       stateController.shutdown();
     } catch {}
@@ -227,7 +266,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("uncaughtException", (err) => {
-    if (debug) process.stderr.write(`[avatar-process] uncaught: ${err.message}\n`);
+    policy.writeDiagnostic(`[avatar-process] uncaught: ${err.message}\n`);
     shutdown("uncaughtException");
   });
 
@@ -239,11 +278,9 @@ async function main(): Promise<void> {
         process.kill(parentPid, 0);
       } catch {
         clearInterval(interval);
-        if (debug) {
-          process.stderr.write(
-            `[avatar-process] parent ${parentPid} disappeared\n`,
-          );
-        }
+        policy.writeDiagnostic(
+          `[avatar-process] parent ${parentPid} disappeared\n`,
+        );
         setTimeout(() => shutdown("parent_gone"), 500).unref();
       }
     }, 1_000);
@@ -251,23 +288,26 @@ async function main(): Promise<void> {
   }
 
   // Start the server. The READY marker includes the actual bound port so
-  // a --port=0 launch is observable end-to-end.
+  // a --port=0 launch is observable end-to-end. In visual-pane mode the
+  // policy suppresses the READY marker — readiness is observed through
+  // /health (which the launcher polls), not through stdout parsing.
   try {
     server = await startServer({
       instanceId,
       port,
       onEvent,
+      policy,
       // Note: avatar-server.ts previously called a separate
       // onMessageDisplayDelta callback. Phase 7 routes talk tokens
       // through the AvatarReaction.talkToken field and the state
       // controller decides when to forward them. AvatarStateController
       // is the single owner of Animator.onTalkToken() calls.
     });
-    process.stdout.write(
+    policy.writeReady(
       `CLAUDE_EMOTE_READY url=${server.url} instance=${instanceId} port=${server.port} parentPid=${parentPid ?? "null"} emoteDir=${chosenSelection.directory}\n`,
     );
   } catch (err) {
-    process.stderr.write(
+    policy.writeFatal(
       `[avatar-process] failed to bind server: ${(err as Error).message}\n`,
     );
     process.exit(1);
