@@ -81,6 +81,71 @@ What is **not yet validated** and remains pending:
 The total automated test count is reported by `npm test` itself;
 this README does not hardcode a number that can drift.
 
+## Status (Phase 10)
+
+Phase 10 is the Windows Terminal discovery and renderer-startup
+closeout. It does not change the runtime architecture beyond
+making the launcher resolve the modern Windows Terminal AppX
+execution alias and giving the avatar process a graceful
+bundled-ASCII startup retry. Full numbers from the prior
+benchmark still live in
+[`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md).
+
+### Windows Terminal discovery
+
+Windows Terminal discovery now supports the AppX execution
+alias at:
+
+```
+%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe
+```
+
+Resolution order is, top to bottom:
+
+1. `CLAUDE_EMOTE_WT_EXE` (explicit override)
+2. The canonical WindowsApps alias
+   (`%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe`)
+3. `where.exe wt.exe` output
+4. `PATH` scan
+
+The resolver uses no `shell: true`, no `cmd /c`, no `start`, no
+PowerShell helper, and no detached process. Spawning is a direct
+`child_process.spawn` of the resolved executable. The shell-free
+spawn path is the contract; do not "helpfully" wrap it in a
+shell later.
+
+### Renderer startup
+
+- **Chafa is optional for basic operation.** When Chafa is
+  missing, not executable, or not Sixel-capable, the avatar falls
+  back to the bundled ASCII renderer and continues to run; no
+  startup failure.
+- **Automatic bundled-image startup retries once.** When the
+  preferred renderer cannot produce its initial frame, the
+  startup sequence retries exactly once with the bundled
+  `AsciiRenderer` and the `emotes/ascii` emote set. This retry is
+  internal to the startup path and only fires for the auto-chosen
+  configuration.
+- **Explicit custom emote directories never silently fall back to
+  bundled artwork.** When the user has explicitly pointed the
+  launcher at a custom emote directory (via `CLAUDE_EMOTE_EMOTE_DIR`
+  or an explicit `config.json` setting), startup failures surface
+  to the user; bundled ASCII is reserved for the implicit, no-user-
+  choice case.
+- **The fallback stays in the same avatar process and keeps the
+  same port, instance ID, parent PID, and HTTP server lifecycle.**
+  A fallback does not spawn a second avatar, does not rebind the
+  port, does not regenerate the instance ID, and does not close or
+  reopen the HTTP server. The HTTP listener and parent-PID watcher
+  remain continuous across the retry.
+
+### What is still pending
+
+- **Real interactive Windows Terminal visual validation.** A human
+  on Windows 10/11, inside an actual Windows Terminal pane, must
+  confirm the avatar appears, animates, and reacts. This step has
+  not yet been rerun against the Phase 10 build and remains pending.
+
 ## What it is
 
 `claude-emote` runs an animated pixel-art avatar in a narrow

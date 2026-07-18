@@ -425,6 +425,16 @@ process.exit(code);
       check(name, ok, detail ?? "");
     }
 
+    // ---- installed Phase 10 fallback smoke (real package) ----
+    console.log("[fallback smoke] preferred-image renderer + missing Chafa → bundled ASCII");
+    const fallbackSmoke = await runInstalledFallbackSmoke(
+      installedRoot,
+      installDir,
+    );
+    for (const [name, ok, detail] of fallbackSmoke) {
+      check(name, ok, detail ?? "");
+    }
+
     // ---- plugin validate (installed root) ---------------------
     console.log("[plugin] claude plugin validate (installed root, strict)");
     const pluginRes = await run(
@@ -736,3 +746,244 @@ main().catch((err) => {
   console.error("validate-package: fatal:", err.message || err);
   process.exit(1);
 });
+
+/**
+ * Phase 10 / Defect B installed-fallback smoke.
+ *
+ * Spawn the installed <root>/dist/host/avatar-process.js with
+ *   - an unrelated tmp cwd
+ *   - a project config selecting the image protocol
+ *   - PATH emptied so Chafa cannot be located
+ *   - LOCALAPPDATA redirected so any WinGet scan also sees nothing
+ *   - CLAUDE_EMOTE_CHAFA_PATH and PI_EMOTE_CHAFA_PATH cleared
+ *
+ * The fallback must:
+ *   - print the warning line
+ *   - print READY with the bundled ascii dir
+ *   - serve /health 200
+ *   - emit the bundled think frame on UserPromptSubmit
+ *   - emit the bundled idle frame on Stop
+ *   - exit cleanly with no development paths or host-Chafa dependency
+ */
+async function runInstalledFallbackSmoke(installedRoot, installDir) {
+  const checks = [];
+  // Two independent temp directories tracked separately so cleanup
+  // can remove BOTH regardless of which phase setup reached.
+  const tmpCwd = mkdtempSync(join(installDir, "fallback-smoke-cwd-"));
+  const tmpLocalAppData = mkdtempSync(join(installDir, "fallback-smoke-lad-"));
+  const projCfgDir = join(
+    tmpCwd,
+    ".claude-emote",
+    "extensions",
+    "claude-emote",
+  );
+  mkdirSync(projCfgDir, { recursive: true });
+  writeFileSync(
+    join(projCfgDir, "config.json"),
+    JSON.stringify({ terminals: [{ match: "unknown", render: "sixel" }] }),
+    "utf8",
+  );
+
+  const cleanEnv = { ...process.env };
+  // Strip renderer-affecting env vars.
+  for (const k of [
+    "WT_SESSION", "TERM_PROGRAM", "ITERM_SESSION_ID",
+    "KITTY_WINDOW_ID", "WEZTERM_PANE", "GHOSTTY_RESOURCES_DIR",
+    "TMUX", "ZELLIJ_SESSION_NAME", "ZELLIJ",
+    "CLAUDE_EMOTE_PORT", "CLAUDE_EMOTE_INSTANCE_ID",
+    "CLAUDE_EMOTE_EMOTE_DIR", "CLAUDE_EMOTE_PARENT_PID",
+    "CLAUDE_EMOTE_LOG_FILE", "CLAUDE_EMOTE_DEBUG",
+    "CLAUDE_EMOTE_DEMO_PROTOCOL",
+    "CLAUDE_EMOTE_CHAFA_PATH", "PI_EMOTE_CHAFA_PATH",
+  ]) delete cleanEnv[k];
+  // Restrict PATH + LOCALAPPDATA so Chafa cannot be located even if
+  // the host has it.
+  cleanEnv.PATH = tmpCwd;
+  cleanEnv.LOCALAPPDATA = tmpLocalAppData;
+
+  const avatarScript = join(installedRoot, "dist", "host", "avatar-process.js");
+  const child = spawn(
+    NODE,
+    [avatarScript, "--port=0", "--instance=fallback-installed"],
+    { env: cleanEnv, stdio: ["ignore", "pipe", "pipe"], cwd: tmpCwd },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (b) => (stdout += b.toString("utf8")));
+  child.stderr?.on("data", (b) => (stderr += b.toString("utf8")));
+
+  /**
+   * Drain a request response fully (including the body) and resolve
+   * with the status code. Uses res.resume() so the socket is not
+   * parked on an unread body. Without resume(), the next request on
+   * the same keep-alive connection can hang.
+   */
+  const drainRequest = (path, method, body) =>
+    new Promise((res) => {
+      const opts = {
+        host: "127.0.0.1",
+        port: readyPort,
+        path,
+        method,
+        timeout: 2000,
+      };
+      if (body) {
+        opts.headers = {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+        };
+      }
+      const req = request(opts, (r) => {
+        // Drain the body so the socket is left in a clean state.
+        r.on("data", () => {});
+        r.on("end", () => res(r.statusCode ?? 0));
+        r.on("error", () => res(-1));
+      });
+      req.on("error", () => res(-1));
+      req.on("timeout", () => {
+        req.destroy();
+        res(-1);
+      });
+      if (body) req.write(body);
+      req.end();
+    });
+
+  // Track readiness port outside try so cleanup can still see it.
+  let readyPort = 0;
+  let readyEmoteDir = "";
+
+  try {
+    // Wait for READY.
+    const readyDeadline = Date.now() + 8000;
+    while (Date.now() < readyDeadline) {
+      if (stdout.includes("CLAUDE_EMOTE_READY")) {
+        const all = stdout
+          .split(/\r?\n/)
+          .filter((l) => l.includes("CLAUDE_EMOTE_READY"));
+        const readyLine = all[all.length - 1] ?? "";
+        const pm = readyLine.match(/port=(\d+)/);
+        const em = readyLine.match(/emoteDir=(\S+)/);
+        if (pm) readyPort = Number(pm[1]);
+        if (em) readyEmoteDir = em[1];
+        break;
+      }
+      if (child.exitCode !== null) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    checks.push([
+      "fallback READY appeared",
+      readyPort > 0,
+      `port=${readyPort}`,
+    ]);
+    checks.push([
+      "fallback READY uses installed bundled ascii directory",
+      !!readyEmoteDir && readyEmoteDir.startsWith(normalize(installedRoot)) &&
+        /emotes[\\/]ascii$/.test(readyEmoteDir),
+      readyEmoteDir,
+    ]);
+    checks.push([
+      "fallback READY does NOT point at the development repository",
+      !readyEmoteDir.startsWith(normalize(ROOT)) ||
+        readyEmoteDir === "",
+      readyEmoteDir,
+    ]);
+    checks.push([
+      "fallback warning line printed",
+      /falling back to bundled ASCII/i.test(stderr),
+      stderr.slice(-200),
+    ]);
+
+    if (readyPort > 0) {
+      // /health
+      const healthCode = await drainRequest("/health", "GET");
+      checks.push([
+        "fallback /health returns 200",
+        healthCode === 200,
+        `code=${healthCode}`,
+      ]);
+
+      // Think-frame probe on UserPromptSubmit.
+      const thinkFrame = "(•_ • )?";
+      const stdoutBeforeThink = stdout.length;
+      const thinkPayload = JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "fallback-installed",
+        prompt: "fallback-installed",
+      });
+      const postCode = await drainRequest(
+        "/event",
+        "POST",
+        thinkPayload,
+      );
+      const thinkDeadline = Date.now() + 4000;
+      let thinkSeen = false;
+      while (Date.now() < thinkDeadline) {
+        if (stdout.slice(stdoutBeforeThink).includes(thinkFrame)) {
+          thinkSeen = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      checks.push([
+        "fallback ASCII think frame emitted after POST",
+        thinkSeen,
+        stdout.slice(-200),
+      ]);
+      checks.push(["fallback POST /event returns 200", postCode === 200]);
+
+      // Stop → idle frame.
+      const stopPayload = JSON.stringify({
+        hook_event_name: "Stop",
+        session_id: "fallback-installed",
+      });
+      const stdoutBeforeStop = stdout.length;
+      const stopCode = await drainRequest(
+        "/event",
+        "POST",
+        stopPayload,
+      );
+      const idleFrame = "(• ◡ •)";
+      const stopDeadline = Date.now() + 4000;
+      let idleSeen = false;
+      while (Date.now() < stopDeadline) {
+        if (stdout.slice(stdoutBeforeStop).includes(idleFrame)) {
+          idleSeen = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      checks.push(["fallback Stop POST returns 200", stopCode === 200]);
+      checks.push(["fallback ASCII idle frame emitted after Stop", idleSeen]);
+    }
+  } finally {
+    // Cleanup. Order:
+    //   1. SIGTERM with bounded wait, await `close`.
+    //   2. If still running, escalate to SIGKILL and await `close`.
+    //   3. Verify PID is no longer alive.
+    //   4. Remove both temp directories regardless of phase.
+    try { child.kill("SIGTERM"); } catch {}
+    await new Promise((res) => {
+      const t = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch {}
+        // Wait for close after escalation.
+        child.once("close", () => { clearTimeout(t); res(); });
+        // Hard limit so a zombie never wedges the script.
+        const hardKill = setTimeout(res, 2_000);
+        child.once("close", () => { clearTimeout(hardKill); });
+      }, 5_000);
+      child.once("close", () => { clearTimeout(t); res(); });
+    });
+    let alive = false;
+    try { process.kill(child.pid, 0); alive = true; } catch {}
+    checks.push([
+      "fallback child process exited cleanly",
+      !alive,
+      `pid=${child.pid}`,
+    ]);
+    try { rmSync(tmpCwd, { recursive: true, force: true }); } catch {}
+    try { rmSync(tmpLocalAppData, { recursive: true, force: true }); } catch {}
+  }
+
+  return checks;
+}

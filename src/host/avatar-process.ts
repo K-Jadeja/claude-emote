@@ -43,12 +43,7 @@ import {
   parseAvatarProcessOptions,
   AvatarParseError,
 } from "./avatar-args.js";
-import { Animator } from "../core/animator.js";
-import {
-  createRenderer,
-  resolveRendererKind,
-} from "../adapters/renderer-factory.js";
-import { StandaloneRenderHost } from "../adapters/standalone-render-host.js";
+import { resolveRendererKind } from "../adapters/renderer-factory.js";
 import { detectTerminalName } from "../core/terminal.js";
 import { setDebug } from "../core/log.js";
 import type { AvatarReaction } from "../claude/event-mapper.js";
@@ -62,48 +57,13 @@ import {
 } from "../shared/emote-selection.js";
 import { validateEmoteDirectory } from "../shared/emote-validation.js";
 import type { RendererKind } from "../shared/emote-validation.js";
-import { PACKAGE_ROOT } from "../shared/project-paths.js";
+import { BUNDLED_ASCII_EMOTE_DIR, PACKAGE_ROOT } from "../shared/project-paths.js";
 import { loadAvatarRuntimeConfig } from "./runtime-config.js";
-
-/**
- * Phase 6: wait for the renderer to produce a usable initial frame.
- * Bounded: at most maxTicks ticks on the macrotask queue. Returns true
- * if a non-null, non-empty frame is available. Never adds a polling
- * interval.
- */
-async function waitForInitialFrame(
-  getFrame: () => unknown,
-  maxTicks = 10,
-): Promise<boolean> {
-  for (let i = 0; i < maxTicks; i++) {
-    const f = getFrame() as
-      | null
-      | undefined
-      | { kind?: string; lines?: string[]; sequence?: string };
-    if (f == null) {
-      await new Promise<void>((r) => setImmediate(r));
-      continue;
-    }
-    if (f.kind === "text") {
-      if (Array.isArray(f.lines) && f.lines.some((l) => l.length > 0)) {
-        return true;
-      }
-    } else if (f.kind === "image") {
-      if (typeof f.sequence === "string" && f.sequence.length > 0) {
-        return true;
-      }
-    } else if (f.kind === "placeholder") {
-      if (Array.isArray(f.lines) && f.lines.some((l) => l.length > 0)) {
-        return true;
-      }
-    } else {
-      // Unknown frame kind — accept as long as it's truthy.
-      return true;
-    }
-    await new Promise<void>((r) => setImmediate(r));
-  }
-  return false;
-}
+import {
+  startRendererRuntimeWithFallback,
+  buildProductionRendererStartupDeps,
+  type RendererStartupDeps,
+} from "./renderer-startup.js";
 
 async function main(): Promise<void> {
   const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
@@ -153,12 +113,6 @@ async function main(): Promise<void> {
     emoteDir,
     rendererKind,
   );
-  config.emotes = [
-    {
-      model: "*",
-      "emote-set": selection.directory.split(/[\\/]/).pop() ?? "default",
-    },
-  ];
   if (debug) {
     process.stderr.write(
       `[avatar-process] emote selection: kind=${selection.kind} dir=${selection.directory}\n`,
@@ -182,42 +136,42 @@ async function main(): Promise<void> {
     );
   }
 
-  // --- Build the renderer with the validated directory. ---
-  const { renderer, resolved, setTuiHost } = createRenderer(
+  // --- Bundled ASCII fallback (Phase 10 / Defect B).
+  //
+  // Construction of the renderer, host, animator, and initial-frame
+  // readiness check, AND the fallback policy itself, lives in
+  // renderer-startup.ts. This file delegates the decision so the
+  // production policy is exercised by exactly one orchestrator.
+  //
+  // We do NOT mutate the caller's shared `config` object across
+  // attempts: attemptRendererStartup operates on a per-attempt clone.
+  const deps: RendererStartupDeps = buildProductionRendererStartupDeps(PACKAGE_ROOT);
+
+  const started = await startRendererRuntimeWithFallback({
     config,
-    PACKAGE_ROOT,
-    selection.directory,
+    selection,
     userConfiguredTerminals,
-  );
+    deps,
+    bundledAsciiDirectory: BUNDLED_ASCII_EMOTE_DIR,
+    validateEmoteDirectory,
+    onFallbackWarning: (msg) => process.stderr.write(msg),
+  });
+
+  if (!started.ok) {
+    process.stderr.write(
+      `[avatar-process] ${started.reason}\n`,
+    );
+    process.exit(4);
+    return;
+  }
+
+  const { renderer, resolved, host, animator, selection: chosenSelection } =
+    started.runtime;
   if (debug) {
     process.stderr.write(
       `[avatar-process] terminal=${detectTerminalName()} protocol=${resolved.protocol} multiplexer=${resolved.multiplexer ?? "(none)"}\n`,
     );
     if (resolved.warning) process.stderr.write(`[avatar-process] ${resolved.warning}\n`);
-  }
-
-  // --- Wire the host to the renderer's live frame getter (Phase 5). ---
-  const host = new StandaloneRenderHost();
-  host.start();
-  setTuiHost(host);
-  host.attachFrameSource(() => renderer.getRenderedFrame());
-
-  // --- Construct the Animator. Force the initial idle state so the
-  // renderer has a real frame BEFORE we declare readiness. ---
-  const animator = new Animator(config, renderer);
-  animator.transitionTo("idle");
-
-  // --- Wait for the renderer to produce a usable initial frame. ---
-  const ready = await waitForInitialFrame(() => renderer.getRenderedFrame());
-  if (!ready) {
-    process.stderr.write(
-      `[avatar-process] renderer failed to produce an initial frame from ${selection.directory}\n`,
-    );
-    try { animator.clearAllTimers(); } catch {}
-    try { renderer.dispose(); } catch {}
-    host.shutdown();
-    process.exit(4);
-    return;
   }
 
   // --- State controller (Phase 7) -------------------------------------------
@@ -310,7 +264,7 @@ async function main(): Promise<void> {
       // is the single owner of Animator.onTalkToken() calls.
     });
     process.stdout.write(
-      `CLAUDE_EMOTE_READY url=${server.url} instance=${instanceId} port=${server.port} parentPid=${parentPid ?? "null"} emoteDir=${selection.directory}\n`,
+      `CLAUDE_EMOTE_READY url=${server.url} instance=${instanceId} port=${server.port} parentPid=${parentPid ?? "null"} emoteDir=${chosenSelection.directory}\n`,
     );
   } catch (err) {
     process.stderr.write(
