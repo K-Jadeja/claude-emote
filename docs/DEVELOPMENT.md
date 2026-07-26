@@ -101,5 +101,5 @@ Run the focused demo integration test, then consult
 
 ### Native binary is missing
 
-Run `npm run overlay:update` once to fetch the pinned Neutralino runtime, then
+Run `npm run overlay:setup` once to fetch the pinned Neutralino runtime, then
 retry `npm run overlay:run`.

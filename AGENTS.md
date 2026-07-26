@@ -15,6 +15,7 @@ Start with:
 - `README.md` for install and user commands.
 - `docs/PRODUCT_VISION.md` for the product contract.
 - `docs/USER_FLOW.md` for the launch, session, and shutdown experience.
+- `docs/COMPATIBILITY.md` for Claude Code and Claude Emote update boundaries.
 - `docs/DESKTOP_OVERLAY_ARCHITECTURE.md` for the desktop design.
 - `docs/DESKTOP_SESSION_PROTOCOL.md` for the privacy and streaming contract.
 - `docs/DEVELOPMENT.md` for the local workflow.

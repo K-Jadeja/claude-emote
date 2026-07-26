@@ -333,6 +333,56 @@ configuration. The launcher also recognizes:
 Variables described as launcher-owned are internal protocol. End users should
 not need to set them in the finished desktop flow.
 
+## Updating Claude Code and Claude Emote
+
+Claude Code and Claude Emote are intentionally independent installations.
+`claude-emote` resolves the real `claude` executable on every launch, so a
+normal Claude Code update is picked up the next time the user starts a session.
+Claude Emote does not pin, replace, or modify Claude Code.
+
+Update Claude Code using the method that installed it:
+
+```powershell
+# Anthropic native installation
+claude update
+
+# Windows Package Manager installation
+winget upgrade Anthropic.ClaudeCode
+
+# npm installation
+npm install -g @anthropic-ai/claude-code@latest
+```
+
+Native Claude Code installations can also update automatically in the
+background. The update takes effect on the next launch.
+
+During repository development, update Claude Emote separately:
+
+```powershell
+git pull
+npm ci
+npm run build
+npm link
+```
+
+A published npm release would instead use:
+
+```powershell
+npm install -g claude-emote@latest
+```
+
+Most additive Claude hook changes are tolerated: extra input fields are
+ignored, and unknown future events do not crash the mapper. A removed or renamed
+hook event can cause a specific animation to stop updating, so compatibility is
+verified and released independently. Claude should still start even if the pet
+cannot connect.
+
+If an update produces unexpected behavior, run `Get-Command claude` and
+`where.exe claude` to find conflicting installations, confirm `claude
+--version`, and update Claude Emote. Users should not have to downgrade or
+freeze Claude Code for the pet. The complete policy and release checks are in
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
+
 ## Custom artwork
 
 The current terminal importer can read PNG and YAML emote sets inherited from

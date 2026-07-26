@@ -57,9 +57,7 @@ Use `--record` after pulling a new upstream commit.
 | Unit | `npm run test:unit` |
 | Integration | `npm run test:integration` |
 | Vendor | `npm run verify:upstream` |
-| Benchmark (informational) | `npm run benchmark:bridge` |
-| Latency sweep | `node scripts/measure-latency.mjs` |
+| Benchmark (informational) | `npm run benchmark:latency` |
 
-The benchmark and latency sweep are informational in CI; they are
-environment-sensitive and may produce WARN-level output on Windows
-due to `node` spawn overhead.
+The benchmark is informational in CI; it is environment-sensitive and may
+produce WARN-level output on Windows due to `node` spawn overhead.
