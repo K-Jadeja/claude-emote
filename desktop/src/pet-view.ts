@@ -12,6 +12,17 @@ export interface PetView {
   dispose(): void;
 }
 
+export async function waitForImageRender(
+  image: Pick<HTMLImageElement, "complete" | "naturalWidth" | "decode">,
+): Promise<void> {
+  if (!image.complete || image.naturalWidth <= 0) {
+    await image.decode();
+  }
+  if (!image.complete || image.naturalWidth <= 0) {
+    throw new Error("Claude Pet frame did not render");
+  }
+}
+
 function requiredElement<T extends HTMLElement>(
   root: ParentNode,
   selector: string,

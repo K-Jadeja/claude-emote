@@ -27,6 +27,8 @@ let port = 0;
 let harnessDir: string | null = null;
 const instanceId = "test-instance-" + Date.now();
 const endpoint = `http://127.0.0.1:${port}/event`;
+const capabilityToken = "avatar_server_test_capability_1234567890";
+const authorization = `Bearer ${capabilityToken}`;
 
 beforeAll(async () => {
   // Pick a free port and spawn the avatar with it.
@@ -57,6 +59,7 @@ beforeAll(async () => {
   // Strip renderer-affecting env vars so terminal detection falls
   // through to the layered config.
   const env: NodeJS.ProcessEnv = { ...process.env };
+  env.CLAUDE_EMOTE_CAPABILITY_TOKEN = capabilityToken;
   for (const k of [
     "WT_SESSION",
     "TERM_PROGRAM",
@@ -158,6 +161,7 @@ function readInitialSseEvent(url: string): Promise<{
         headers: {
           accept: "text/event-stream",
           origin: "http://127.0.0.1:61234",
+          authorization,
         },
         timeout: 2_000,
       },
@@ -198,7 +202,12 @@ function readInitialSseEvent(url: string): Promise<{
   });
 }
 
-function post(url: string, body: string, contentType = "application/json"): Promise<{ status: number; body: string }> {
+function post(
+  url: string,
+  body: string,
+  contentType = "application/json",
+  headers: Record<string, string> = { authorization },
+): Promise<{ status: number; body: string }> {
   return new Promise((resolveOne, rejectErr) => {
     const u = new URL(url);
     const req = request(
@@ -207,7 +216,11 @@ function post(url: string, body: string, contentType = "application/json"): Prom
         hostname: u.hostname,
         port: u.port,
         path: u.pathname,
-        headers: { "content-type": contentType, "content-length": Buffer.byteLength(body) },
+        headers: {
+          "content-type": contentType,
+          "content-length": Buffer.byteLength(body),
+          ...headers,
+        },
         timeout: 2000,
       },
       (res) => {
@@ -233,6 +246,7 @@ describe("avatar-server (M4 integration)", () => {
     const body = JSON.parse(res.body);
     expect(body.ok).toBe(true);
     expect(body.instanceId).toBe(instanceId);
+    expect(body.capabilityRequired).toBe(true);
   });
 
   it("rejects unknown paths with 404", async () => {
@@ -249,6 +263,24 @@ describe("avatar-server (M4 integration)", () => {
     expect(body.reaction.state).toBe("hi");
   });
 
+  it("rejects hook and state requests without the session capability", async () => {
+    const fixture = readFileSync(join(FIXTURE_DIR, "SessionStart.json"), "utf8");
+    const event = await post(
+      `http://127.0.0.1:${port}/event`,
+      fixture,
+      "application/json",
+      {},
+    );
+    expect(event.status).toBe(401);
+    expect(JSON.parse(event.body).error).toBe("unauthorized");
+
+    const state = await get(`http://127.0.0.1:${port}/state`, {
+      origin: "http://localhost:61234",
+    });
+    expect(state.status).toBe(401);
+    expect(JSON.parse(state.body).error).toBe("unauthorized");
+  });
+
   it("accepts a PreToolUse Read fixture and returns read state", async () => {
     const fixture = readFileSync(join(FIXTURE_DIR, "PreToolUse_Read.json"), "utf8");
     const res = await post(`http://127.0.0.1:${port}/event`, fixture);
@@ -259,6 +291,7 @@ describe("avatar-server (M4 integration)", () => {
   it("exposes only privacy-minimal semantic state after a real hook payload", async () => {
     const res = await get(`http://127.0.0.1:${port}/state`, {
       origin: "http://localhost:61234",
+      authorization,
     });
     expect(res.status).toBe(200);
     expect(res.headers["access-control-allow-origin"]).toBe(
@@ -295,9 +328,65 @@ describe("avatar-server (M4 integration)", () => {
   it("rejects a non-loopback browser origin from state endpoints", async () => {
     const res = await get(`http://127.0.0.1:${port}/state`, {
       origin: "https://evil.example",
+      authorization,
     });
     expect(res.status).toBe(403);
     expect(JSON.parse(res.body).error).toBe("origin_forbidden");
+  });
+
+  it("supports authenticated CORS preflight and overlay readiness", async () => {
+    const preflight = await new Promise<{
+      status: number;
+      headers: import("node:http").IncomingHttpHeaders;
+    }>((resolveOne, rejectErr) => {
+      const req = request(
+        `http://127.0.0.1:${port}/overlay-ready`,
+        {
+          method: "OPTIONS",
+          headers: {
+            origin: "http://127.0.0.1:61234",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "authorization",
+          },
+        },
+        (res) => {
+          res.resume();
+          res.on("end", () =>
+            resolveOne({
+              status: res.statusCode ?? 0,
+              headers: res.headers,
+            }),
+          );
+        },
+      );
+      req.on("error", rejectErr);
+      req.end();
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers["access-control-allow-headers"]).toContain(
+      "authorization",
+    );
+
+    const before = await get(
+      `http://127.0.0.1:${port}/overlay-health`,
+      { authorization },
+    );
+    expect(before.status).toBe(503);
+
+    const ready = await post(
+      `http://127.0.0.1:${port}/overlay-ready`,
+      "",
+      "application/json",
+      { authorization },
+    );
+    expect(ready.status).toBe(204);
+
+    const after = await get(
+      `http://127.0.0.1:${port}/overlay-health`,
+      { authorization },
+    );
+    expect(after.status).toBe(200);
+    expect(JSON.parse(after.body).ok).toBe(true);
   });
 
   it("accepts a Stop fixture and returns idle", async () => {

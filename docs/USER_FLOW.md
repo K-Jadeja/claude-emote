@@ -8,13 +8,13 @@ It is not a separate AI client and it does not replace Claude Code. It is a
 small supervisor that starts the real `claude` process together with the local
 session host and the visual companion.
 
-The next implementation milestone is to make that existing launcher start the
-desktop overlay automatically. The terminal renderer remains an available
-renderer, not a second product.
+On Windows x64, that launcher now starts the desktop overlay automatically.
+The terminal renderer remains an explicit available renderer, not a second
+product.
 
-## Intended first-run flow
+## First-run flow
 
-The eventual packaged installation should provide:
+The packaged installation provides:
 
 ```powershell
 claude-emote
@@ -48,7 +48,7 @@ Start per-session Node host
         +---- wait for /health
         |
         v
-Start desktop overlay with stream URL + capability
+Start desktop overlay with endpoint + capability in its child environment
         |
         +---- wait for native-window readiness
         |
@@ -59,9 +59,9 @@ Start real Claude Code with bundled plugin
 Forward terminal input/output and Claude's eventual exit code
 ```
 
-The capability token is a required part of the automatic desktop milestone.
-Binding to loopback and restrictive CORS are useful boundaries, but they do not
-authenticate another local process.
+The capability is required by every session route except content-free health.
+Binding to loopback and restrictive CORS are useful additional boundaries, but
+they do not authenticate another local process.
 
 ## During a session
 
@@ -160,7 +160,8 @@ Claude Code command hooks provide:
 - a stable session ID;
 - plugin packaging;
 - deterministic execution that is independent of model judgment;
-- an environment variable containing the launcher's random endpoint;
+- environment variables containing the launcher's random endpoint and
+  capability;
 - fail-open behavior appropriate for an observational companion.
 
 They also let the repository keep one narrow bridge that sanitizes data before
@@ -175,9 +176,9 @@ for a later stable local daemon, but the current per-session design allocates a
 random endpoint at launch. The bridge resolves that endpoint from the session
 environment and keeps the plugin portable.
 
-Revisit direct HTTP hooks after the capability-token and multi-session daemon
-contracts exist. Do not introduce a fixed unauthenticated port merely to remove
-the bridge.
+Revisit direct HTTP hooks only if the multi-session daemon contract makes them
+materially simpler. Do not introduce a fixed unauthenticated port merely to
+remove the bridge.
 
 ### Terminal scraping
 
@@ -242,7 +243,7 @@ without changing the desktop state shape:
 The tray must not become the source of truth. Each owning session host remains
 authoritative for its own current state.
 
-## Acceptance criteria for automatic desktop launch
+## Automatic desktop launch acceptance
 
 - `claude-emote` starts the desktop pet and real Claude with one command.
 - Every user-supplied Claude argument arrives unchanged.

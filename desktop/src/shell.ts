@@ -6,6 +6,7 @@ const DESIGN_HEIGHT = 324;
 export interface PetShell {
   readonly kind: "neutralino" | "browser";
   initialize(): Promise<void>;
+  getEnvironmentValue(name: string): Promise<string | null>;
   makeDraggable(element: HTMLElement, exclusions: HTMLElement[]): Promise<void>;
   close(exitCode?: number): Promise<void>;
   reportError(error: Error): Promise<void>;
@@ -51,6 +52,10 @@ function createNativeShell(api: NeutralinoApi): PetShell {
         void api.app.exit(0);
       });
     },
+    async getEnvironmentValue(name) {
+      const value = await api.os.getEnv(name);
+      return value === "" ? null : value;
+    },
     async makeDraggable(element, exclusions) {
       await api.window.setDraggableRegion(element, { exclude: exclusions });
     },
@@ -73,6 +78,9 @@ function createBrowserShell(): PetShell {
   return {
     kind: "browser",
     async initialize() {},
+    async getEnvironmentValue() {
+      return null;
+    },
     async makeDraggable() {},
     async close() {
       globalThis.close();

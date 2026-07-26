@@ -7,16 +7,15 @@ that shows when a session is thinking, reading, writing, using tools, waiting
 for permission, finished, or blocked. It does not read terminal text and does
 not make another model call.
 
-The project currently has two renderers:
+The project has two supported renderers:
 
 - a production-tested terminal renderer that runs beside Claude Code in
   Windows Terminal;
-- a new transparent desktop overlay built with Neutralinojs and the operating
+- a transparent desktop overlay built with Neutralinojs and the operating
   system WebView.
 
-The desktop overlay is a working developer preview. The next release milestone
-is to make the existing `claude-emote` command start and connect it
-automatically.
+On Windows, the desktop pet is the default. The launcher starts and supervises
+the host, overlay, bundled Claude plugin, and real Claude Code process.
 
 ## Why this architecture
 
@@ -51,14 +50,14 @@ about 4 MB before installer packaging or signing. Electron is not required.
 | --- | --- |
 | Claude Code hook plugin | Working |
 | Terminal avatar beside Claude | Working |
-| Transparent always-on-top desktop pet | Working developer preview |
+| Transparent always-on-top desktop pet | Working |
 | Desktop demo with every pose | Working |
 | Live semantic state snapshot and SSE stream | Working |
 | Permission-needed and session-ended states | Working |
 | Window dragging and position persistence | Working |
 | Windows display scaling | Tested |
 | Packaged Windows executable | Builds and launches |
-| One-command automatic desktop launch | Next milestone |
+| One-command automatic desktop launch | Working on Windows x64 |
 | Installer, tray, signing, auto-update | Not implemented |
 | Multi-session pet manager | Not implemented |
 
@@ -86,6 +85,7 @@ git clone <repository-url> claude-emote
 cd claude-emote
 npm ci
 npm run build
+npm run overlay:package
 ```
 
 To make the development checkout's command available globally:
@@ -105,7 +105,7 @@ This repository is currently private in `package.json` and has not been
 published to npm. Do not expect `npm install -g claude-emote` from the public
 registry to work yet.
 
-## Use the terminal avatar
+## Start Claude with the desktop pet
 
 Run `claude-emote` wherever you would normally run `claude`:
 
@@ -121,14 +121,33 @@ All arguments are forwarded to the real Claude Code process. The launcher:
 1. verifies that Claude Code is available;
 2. allocates a random loopback port and session ID;
 3. starts the local avatar host;
-4. opens the terminal renderer in a narrow Windows Terminal pane;
-5. waits for the avatar host health check;
+4. opens the native desktop pet and waits for its first connected render;
+5. waits for authenticated host and overlay health checks;
 6. starts Claude with this repository's plugin and session endpoint;
 7. forwards Claude's exit code and cleans up the session process.
 
 If the visual process cannot start after its bounded startup checks, Claude
-still starts and the launcher prints a clear warning. A cosmetic companion
-must not prevent the user's coding session.
+still starts without emote hooks and the launcher prints a clear warning. It
+does not silently substitute the terminal renderer.
+
+Renderer choices are launcher-owned flags and are removed before Claude starts:
+
+```powershell
+claude-emote --emote-renderer=desktop --resume
+claude-emote --emote-renderer=terminal --resume
+claude-emote --no-emote --resume
+```
+
+Everything after `--` is forwarded literally to Claude, including anything
+that resembles an emote flag.
+
+Check an installation without starting Claude:
+
+```powershell
+claude-emote --emote-doctor
+```
+
+See [`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md) for safe debug output.
 
 ## Run the desktop pet demo
 
@@ -162,63 +181,21 @@ tracked by Git.
 
 ## Run a live desktop development session
 
-Automatic launcher-to-overlay orchestration is the next milestone. Until that
-lands, a live overlay can be connected manually:
+Build or package the overlay once, link the checkout, then use the real command:
 
-1. Build the Node host and desktop resources:
-
-   ```powershell
-   npm run build
-   npm run overlay:build
-   npm run overlay:setup
-   ```
-
-2. In PowerShell window 1, start the session host. Keep this window open:
-
-   ```powershell
-   node .\dist\host\avatar-process.js `
-     --port=43123 `
-     --instance=desktop-dev `
-     "--parentPid=$PID"
-   ```
-
-   Replace `43123` if that port is already occupied. The process prints
-   readiness information outside visual-pane mode.
-
-3. In PowerShell window 2, launch Neutralino with the event endpoint encoded
-   in its URL:
-
-   ```powershell
-   desktop\bin\neutralino-win_x64.exe `
-     --load-dir-res `
-     --path=desktop `
-     "--url=/?endpoint=http%3A%2F%2F127.0.0.1%3A43123%2Fevent"
-   ```
-
-4. In PowerShell window 3, point the bundled hook bridge at the same session
-   host and start Claude with this repository as a plugin:
-
-   ```powershell
-   $env:CLAUDE_EMOTE_ENDPOINT = "http://127.0.0.1:43123/event"
-   claude --plugin-dir (Resolve-Path .)
-   ```
-
-5. Submit prompts and approve a tool request to observe live state changes.
-   Exit Claude, then stop the two development processes with `Ctrl+C`.
-
-The exact protocol and a more detailed development recipe are in
-[`docs/DESKTOP_SESSION_PROTOCOL.md`](docs/DESKTOP_SESSION_PROTOCOL.md).
-This manual procedure is for contributors, not the intended end-user flow.
-
-## Intended one-command user flow
-
-The next implementation changes `claude-emote` from:
-
-```text
-Claude + terminal pet
+```powershell
+npm run overlay:package
+npm link
+claude-emote --resume
 ```
 
-to:
+The authenticated manual protocol is documented in
+[`docs/DESKTOP_SESSION_PROTOCOL.md`](docs/DESKTOP_SESSION_PROTOCOL.md) for
+contributors writing protocol tests. End users never copy endpoints or tokens.
+
+## One-command user flow
+
+The implemented process tree is:
 
 ```text
 claude-emote [normal Claude arguments]
@@ -321,7 +298,9 @@ configuration. The launcher also recognizes:
 | --- | --- |
 | `CLAUDE_EMOTE_INSTANCE_ID` | Per-launch ID set by the launcher |
 | `CLAUDE_EMOTE_ENDPOINT` | Per-session loopback event URL set by the launcher |
+| `CLAUDE_EMOTE_CAPABILITY_TOKEN` | Internal per-session bearer capability; never put in URLs or logs |
 | `CLAUDE_EMOTE_PARENT_PID` | Launcher PID used for orphan cleanup |
+| `CLAUDE_EMOTE_RENDERER` | Optional `desktop`, `terminal`, or `none` default |
 | `CLAUDE_EMOTE_DEBUG=1` | Verbose diagnostic logging |
 | `CLAUDE_EMOTE_CHAFA_PATH` | Explicit `chafa.exe` path |
 | `CLAUDE_EMOTE_EMOTE_DIR` | Explicit custom terminal emote directory |
@@ -452,7 +431,13 @@ Install or repair Claude Code before retrying.
 
 ### The terminal avatar pane does not appear
 
-Run `claude-emote` inside Windows Terminal. The launcher uses the
+Select terminal mode and run inside Windows Terminal:
+
+```powershell
+claude-emote --emote-renderer=terminal
+```
+
+The launcher uses the
 `WT_SESSION` environment value to avoid opening a pane in an unrelated terminal
 window.
 
@@ -472,11 +457,12 @@ The desktop overlay always uses its bundled local PNG frames.
 
 ### The desktop overlay does not start
 
-Fetch the pinned native runtime and retry:
+Build the pinned native runtime and package, then retry:
 
 ```powershell
 npm run overlay:setup
-npm run overlay:run
+npm run overlay:package
+claude-emote
 ```
 
 If it opens as an opaque rectangle, update WebView2 and confirm that

@@ -41,12 +41,13 @@ Claude Code hook
       |
       | event JSON over localhost
       v
-Node session host
+Renderer-free Node session host
   - validates the hook
   - maps it to semantic state
   - owns timers and current snapshot
       |
-      | GET /state + SSE /stream
+      | Authorization: Bearer <per-session capability>
+      | authenticated GET /state + SSE /stream
       | snapshot + semantic events only
       v
 Desktop UI
@@ -131,10 +132,14 @@ attribution, frame dimensions, and mappings for all required activities.
 
 ## Security
 
-The host binds only to `127.0.0.1`. Browser reads use restrictive loopback-only
-CORS, and the state schema excludes session content. Before this becomes a
-generally distributed multi-session daemon, add a per-session capability token
-as a second local-process boundary.
+The host binds only to `127.0.0.1`. Every launcher-owned session uses a random
+capability token for hooks, snapshots, SSE, and overlay readiness. It is passed
+only through child environments and an HTTP authorization header, never a URL,
+command line, log, or state payload. Loopback-only CORS and the strict semantic
+schema are additional boundaries, not substitutes for authorization.
+
+The desktop stream uses streaming `fetch` because the browser `EventSource`
+interface cannot attach the required authorization header.
 
 ## Revisit criteria
 

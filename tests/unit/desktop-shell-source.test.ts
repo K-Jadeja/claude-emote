@@ -19,11 +19,13 @@ describe("desktop native shell configuration", () => {
 
     expect(config.nativeAllowList).toContain("window.getSize");
     expect(config.nativeAllowList).toContain("window.setSize");
+    expect(config.nativeAllowList).toContain("os.getEnv");
     expect(config.cli.resourcesPath).toBe("/resources/");
     expect(config.modes.window.icon).toMatch(/^\/resources\/assets\//);
     expect(config.modes.window.enableInspector).toBe(false);
     expect(source).toContain("globalThis.devicePixelRatio");
     expect(source).toContain("DESIGN_WIDTH * displayScale");
     expect(source).toContain("DESIGN_HEIGHT * displayScale");
+    expect(source).toContain("api.os.getEnv");
   });
 });

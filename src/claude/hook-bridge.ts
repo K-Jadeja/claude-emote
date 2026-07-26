@@ -24,6 +24,10 @@
 import { request } from "node:http";
 import { URL } from "node:url";
 import { writeFileSync } from "node:fs";
+import {
+  buildCapabilityAuthorization,
+  isSessionCapability,
+} from "../shared/session-capability.js";
 
 const REQUEST_TIMEOUT_MS = 1500;
 const MAX_BODY_BYTES = 256 * 1024; // 256 KiB — well above any reasonable hook payload.
@@ -90,15 +94,20 @@ function postJson(endpoint: string, body: string): Promise<void> {
       return;
     }
 
+    const capability = process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN;
+    const headers: Record<string, string | number> = {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body, "utf8"),
+    };
+    if (isSessionCapability(capability)) {
+      headers.authorization = buildCapabilityAuthorization(capability);
+    }
     const opts = {
       method: "POST",
       hostname: url.hostname,
       port: url.port,
       path: url.pathname + url.search,
-      headers: {
-        "content-type": "application/json",
-        "content-length": Buffer.byteLength(body, "utf8"),
-      },
+      headers,
       timeout: REQUEST_TIMEOUT_MS,
     };
 
@@ -110,6 +119,9 @@ function postJson(endpoint: string, body: string): Promise<void> {
     };
 
     const req = request(opts, (res) => {
+      if ((res.statusCode ?? 500) >= 400) {
+        dbg(`avatar server returned HTTP ${res.statusCode ?? "unknown"}`);
+      }
       res.resume();
       res.on("end", done);
       res.on("error", done);

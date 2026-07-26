@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepack": "npm run build",
+    "prepack": "npm run build && npm run overlay:package",
     "pretest": "npm run build",
     "test": "vitest run --no-file-parallelism --pool=forks",
     "test:unit": "vitest run tests/unit --no-file-parallelism --pool=forks",
@@ -55,6 +55,8 @@
     "emotes/ascii/**",
     "emotes/default",
     "emotes/default/**",
+    "desktop/dist/claude-pet/claude-pet-win_x64.exe",
+    "desktop/dist/claude-pet/resources.neu",
     "config.json",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",

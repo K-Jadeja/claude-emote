@@ -56,16 +56,19 @@ fails the script.
 | `src/claude/hook-event.ts`               | `NEW_ADAPTER` | Strongly-typed shape of every supported Claude Code hook event. |
 | `src/claude/event-mapper.ts`             | `NEW_ADAPTER` | Single source of truth mapping Claude events to avatar states. |
 | `src/claude/hook-bridge.ts`              | `NEW_ADAPTER` | Node-stdlib-only bridge that POSTs the event JSON to the avatar server. |
-| `src/host/avatar-server.ts`              | `NEW_ADAPTER` | HTTP server bound to 127.0.0.1; accepts `/event`, exposes `/health`. |
+| `src/host/avatar-server.ts`              | `NEW_ADAPTER` | Capability-protected hook/state/SSE/readiness server bound to 127.0.0.1. |
 | `src/host/avatar-process.ts`             | `NEW_ADAPTER` | Owns one `Animator` and the selected renderer; cleans up on signal/exit. |
+| `src/host/session-auth.ts`               | `NEW_ADAPTER` | Constant-time bearer-capability verification. |
+| `src/host/session-host-process.ts`       | `NEW_ADAPTER` | Renderer-free semantic host for native desktop sessions. |
 | `src/host/avatar-args.ts`                | `NEW_ADAPTER` | Validates avatar-process command-line arguments. |
 | `src/host/avatar-state-controller.ts`    | `NEW_ADAPTER` | Applies state priority while synchronizing timed Animator transitions. |
 | `src/host/output-policy.ts`              | `NEW_ADAPTER` | Separates visual-pane output from diagnostic logging. |
 | `src/host/pet-session-state-tracker.ts`  | `NEW_ADAPTER` | Converts accepted reactions into the five-field desktop state without retaining raw content. |
 | `src/host/renderer-startup.ts`           | `NEW_ADAPTER` | Performs bounded renderer startup and permitted bundled-ASCII recovery. |
 | `src/host/runtime-config.ts`              | `NEW_ADAPTER` | Resolves layered runtime configuration and explicit user choices. |
-| `src/launcher/args.ts`                   | `NEW_ADAPTER` | Pure Claude, avatar, and Windows Terminal argument construction. |
-| `src/launcher/claude-emote.ts`           | `NEW_ADAPTER` | CLI entry point: pane launch, health handshake, env propagation. |
+| `src/launcher/args.ts`                   | `NEW_ADAPTER` | Pure wrapper parsing plus Claude, host, and terminal argument construction. |
+| `src/launcher/claude-emote.ts`           | `NEW_ADAPTER` | CLI entry point and supervised desktop/terminal/none lifecycle. |
+| `src/launcher/desktop-overlay.ts`        | `NEW_ADAPTER` | Resolves packaged/dev native runtimes and builds secret-free spawn arguments. |
 | `src/launcher/startup.ts`                | `NEW_ADAPTER` | Import-safe process readiness and owned-child cleanup helpers. |
 
 ### `src/shared/`
@@ -76,6 +79,7 @@ fails the script.
 | `src/shared/emote-validation.ts` | `NEW_ADAPTER` | Validates emote directories and required assets. |
 | `src/shared/pet-session-state.ts` | `NEW_ADAPTER` | Defines and strictly validates the privacy-minimal desktop protocol. |
 | `src/shared/project-paths.ts` | `NEW_ADAPTER` | Resolves package paths consistently in source, build, and installed layouts. |
+| `src/shared/session-capability.ts` | `NEW_ADAPTER` | Shared validation and authorization-header construction for per-session tokens. |
 
 ### `desktop/`
 
@@ -94,8 +98,8 @@ Neutralinojs or Codex.
 | `desktop/src/pet-state.ts` | `NEW_UI` | Pure state, labels, and frame selection. |
 | `desktop/src/pet-view.ts` | `NEW_UI` | DOM renderer and local frame animation. |
 | `desktop/src/pointer-guard.ts` | `NEW_UI` | Prevents controls from initiating native window dragging. |
-| `desktop/src/session-stream-client.ts` | `NEW_UI` | Loopback-only SSE client with strict validation and sequence ordering. |
-| `desktop/src/shell.ts` | `NEW_UI` | Neutralino/browser boundary for window behavior and position persistence. |
+| `desktop/src/session-stream-client.ts` | `NEW_UI` | Authenticated streaming-fetch SSE client with strict validation and sequence ordering. |
+| `desktop/src/shell.ts` | `NEW_UI` | Neutralino/browser boundary for window behavior, environment reads, and position persistence. |
 
 ### Upstream files NOT ported
 

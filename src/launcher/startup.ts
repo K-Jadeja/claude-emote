@@ -52,6 +52,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { request } from "node:http";
+import { buildCapabilityAuthorization } from "../shared/session-capability.js";
 
 /**
  * Discriminated result for "can we start Claude yet?" decisions.
@@ -213,6 +214,67 @@ export function waitForEndpointHealth(
       () => finish(false),
       healthTimeoutMs,
     );
+  });
+}
+
+/**
+ * Wait until the native overlay has both connected to authenticated SSE and
+ * acknowledged its first render. Child exit and spawn failure are fatal to
+ * this companion attempt, while Claude itself remains runnable.
+ */
+export function waitForOwnedOverlayStartup(
+  child: ChildProcess,
+  endpoint: string,
+  capabilityToken: string,
+  timeoutMs: number,
+): Promise<AvatarStartupResult> {
+  return new Promise<AvatarStartupResult>((resolveOne) => {
+    let finished = false;
+    let pollTimer: NodeJS.Timeout | null = null;
+    let deadlineTimer: NodeJS.Timeout | null = null;
+    const finish = (result: AvatarStartupResult): void => {
+      if (finished) return;
+      finished = true;
+      if (pollTimer) clearInterval(pollTimer);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
+      resolveOne(result);
+    };
+    const onError = (error: Error): void =>
+      finish({ status: "spawn-error", error });
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>
+      finish({ status: "exited", code, signal });
+    child.once("error", onError);
+    child.once("exit", onExit);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      onExit(child.exitCode, child.signalCode);
+      return;
+    }
+
+    const url = new URL("/overlay-health", endpoint).toString();
+    const poll = (): void => {
+      const req = request(
+        url,
+        {
+          method: "GET",
+          timeout: 500,
+          headers: {
+            authorization: buildCapabilityAuthorization(capabilityToken),
+          },
+        },
+        (res) => {
+          res.resume();
+          if (res.statusCode === 200) finish({ status: "healthy" });
+        },
+      );
+      req.on("error", () => {});
+      req.on("timeout", () => req.destroy());
+      req.end();
+    };
+    poll();
+    pollTimer = setInterval(poll, 100);
+    deadlineTimer = setTimeout(() => finish({ status: "timeout" }), timeoutMs);
   });
 }
 

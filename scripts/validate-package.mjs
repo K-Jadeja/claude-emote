@@ -291,7 +291,10 @@ async function main() {
     const requiredEntries = [
       "dist/launcher/claude-emote.js",
       "dist/host/avatar-process.js",
+      "dist/host/session-host-process.js",
       "dist/claude/hook-bridge.js",
+      "desktop/dist/claude-pet/claude-pet-win_x64.exe",
+      "desktop/dist/claude-pet/resources.neu",
       "bin/claude-emote.cjs",
       "hooks/hooks.json",
       ".claude-plugin/plugin.json",
@@ -330,6 +333,18 @@ async function main() {
     check(
       "installed dist avatar-process exists",
       existsSync(join(installedRoot, "dist", "host", "avatar-process.js")),
+    );
+    check(
+      "installed semantic session host exists",
+      existsSync(join(installedRoot, "dist", "host", "session-host-process.js")),
+    );
+    check(
+      "installed Windows desktop overlay exists",
+      existsSync(join(installedRoot, "desktop", "dist", "claude-pet", "claude-pet-win_x64.exe")),
+    );
+    check(
+      "installed desktop resource archive exists",
+      existsSync(join(installedRoot, "desktop", "dist", "claude-pet", "resources.neu")),
     );
     check(
       "installed bin/claude-emote.cjs exists",
@@ -417,6 +432,129 @@ process.exit(code);
       }
       check("no fake Claude survives --version", !alive, `pid=${versionRecord.pid}`);
     }
+
+    // ---- installed one-command desktop smoke -------------------
+    console.log("[desktop launcher smoke] installed bin + real semantic host + fake native shell");
+    const desktopClaude = join(installDir, "desktop-claude.cjs");
+    const desktopOverlay = join(installDir, "desktop-overlay.cjs");
+    const desktopClaudeRecord = join(installDir, "desktop-claude.json");
+    const desktopOverlayRecord = join(installDir, "desktop-overlay.json");
+    writeFileSync(
+      desktopClaude,
+      `
+const fs = require("node:fs");
+const http = require("node:http");
+fs.writeFileSync(process.env.DESKTOP_CLAUDE_RECORD, JSON.stringify({
+  argv: process.argv.slice(2),
+  endpoint: process.env.CLAUDE_EMOTE_ENDPOINT || null,
+  capability: process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN || null
+}));
+const url = new URL(process.env.CLAUDE_EMOTE_ENDPOINT);
+const token = process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN;
+const body = JSON.stringify({ hook_event_name: "SessionEnd", session_id: "package-smoke" });
+const req = http.request(url, {
+  method: "POST",
+  headers: {
+    authorization: "Bearer " + token,
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(body)
+  }
+}, (res) => { res.resume(); res.on("end", () => process.exit(17)); });
+req.on("error", () => process.exit(91));
+req.end(body);
+`,
+      "utf8",
+    );
+    writeFileSync(
+      desktopOverlay,
+      `
+const fs = require("node:fs");
+const http = require("node:http");
+const endpoint = process.env.CLAUDE_EMOTE_ENDPOINT;
+const token = process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN;
+fs.writeFileSync(process.env.DESKTOP_OVERLAY_RECORD, JSON.stringify({
+  pid: process.pid,
+  argv: process.argv.slice(2),
+  endpoint,
+  tokenPresent: Boolean(token),
+  tokenInArgv: process.argv.some((value) => value.includes(token || "__missing__"))
+}));
+const req = http.request(new URL("/overlay-ready", endpoint), {
+  method: "POST",
+  headers: { authorization: "Bearer " + token }
+}, (res) => { res.resume(); res.on("end", () => setInterval(() => {}, 1000)); });
+req.on("error", () => process.exit(92));
+req.end();
+`,
+      "utf8",
+    );
+    const desktopRes = await runWithTimeout(
+      NODE,
+      [installedBin, "--resume", "--model", "opus"],
+      15_000,
+      {
+        cwd: installDir,
+        env: {
+          ...process.env,
+          CLAUDE_EMOTE_CLAUDE_EXE: desktopClaude,
+          CLAUDE_EMOTE_OVERLAY_EXE: desktopOverlay,
+          CLAUDE_EMOTE_RENDERER: "desktop",
+          CLAUDE_EMOTE_TEST_PLATFORM: "win32",
+          CLAUDE_EMOTE_HEALTH_TIMEOUT_MS: "3000",
+          CLAUDE_EMOTE_SESSION_END_GRACE_MS: "50",
+          CLAUDE_EMOTE_ENDED_DISPLAY_MS: "0",
+          DESKTOP_CLAUDE_RECORD: desktopClaudeRecord,
+          DESKTOP_OVERLAY_RECORD: desktopOverlayRecord,
+        },
+      },
+    );
+    check(
+      "installed desktop launcher preserves Claude exit code",
+      desktopRes.code === 17,
+      desktopRes.stderr,
+    );
+    const desktopClaudeState = JSON.parse(
+      readFileSync(desktopClaudeRecord, "utf8"),
+    );
+    const desktopOverlayState = JSON.parse(
+      readFileSync(desktopOverlayRecord, "utf8"),
+    );
+    check(
+      "installed desktop launcher preserves Claude argv",
+      desktopClaudeState.argv.slice(0, 3).join("\0") ===
+        ["--resume", "--model", "opus"].join("\0"),
+      JSON.stringify(desktopClaudeState.argv),
+    );
+    const pluginIndex = desktopClaudeState.argv.indexOf("--plugin-dir");
+    check(
+      "installed desktop launcher injects installed plugin root",
+      pluginIndex >= 0 &&
+        normalize(desktopClaudeState.argv[pluginIndex + 1]) ===
+          normalize(installedRoot),
+      JSON.stringify(desktopClaudeState.argv),
+    );
+    check(
+      "installed desktop launcher supplies a capability",
+      /^[A-Za-z0-9_-]{43}$/.test(desktopClaudeState.capability),
+    );
+    check(
+      "installed overlay receives no endpoint or capability in argv",
+      desktopOverlayState.tokenInArgv === false &&
+        !desktopOverlayState.argv.join(" ").includes(desktopOverlayState.endpoint),
+      JSON.stringify(desktopOverlayState.argv),
+    );
+    let overlayAlive = false;
+    try {
+      process.kill(desktopOverlayState.pid, 0);
+      overlayAlive = true;
+    } catch {
+      overlayAlive = false;
+    }
+    check(
+      "installed desktop launcher cleans the owned overlay",
+      !overlayAlive,
+      `pid=${desktopOverlayState.pid}`,
+    );
 
     // ---- installed avatar-process smoke (real frame) ----------
     console.log("[avatar smoke] spawning installed avatar-process.js with --port=0");

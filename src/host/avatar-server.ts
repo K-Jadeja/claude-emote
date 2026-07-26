@@ -18,6 +18,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mapEventSafe, type AvatarReaction } from "../claude/event-mapper.js";
 import type { PetSessionState } from "../shared/pet-session-state.js";
 import type { AvatarOutputPolicy } from "./output-policy.js";
+import { isCapabilityAuthorized } from "./session-auth.js";
 
 const MAX_BODY_BYTES = 256 * 1024; // matches bridge contract.
 const REQUEST_TIMEOUT_MS = 5_000;
@@ -37,6 +38,12 @@ export interface AvatarServerOptions {
   onMessageDisplayDelta?: (content: string) => void;
   /** Privacy-minimal snapshot and update stream consumed by the desktop pet. */
   sessionState: PetSessionStateSource;
+  /**
+   * When supplied, every hook/state/overlay endpoint requires an exact Bearer
+   * token. The optional form preserves direct legacy terminal harnesses; the
+   * launcher-owned desktop host always supplies one.
+   */
+  capabilityToken?: string;
   /**
    * Output policy for every diagnostic the server emits. When the
    * server runs inside a Windows Terminal visual pane the policy
@@ -126,6 +133,28 @@ function applyStateCors(req: IncomingMessage, res: ServerResponse): boolean {
   return true;
 }
 
+function requireCapability(
+  req: IncomingMessage,
+  res: ServerResponse,
+  expectedToken: string | undefined,
+): boolean {
+  if (isCapabilityAuthorized(req.headers.authorization, expectedToken)) {
+    return true;
+  }
+  res.setHeader("www-authenticate", "Bearer");
+  writeJson(res, 401, { ok: false, error: "unauthorized" });
+  return false;
+}
+
+function isBrowserEndpoint(pathname: string): boolean {
+  return [
+    "/state",
+    "/stream",
+    "/overlay-ready",
+    "/overlay-health",
+  ].includes(pathname);
+}
+
 function writeSseEvent(
   res: ServerResponse,
   eventName: "snapshot" | "state",
@@ -144,6 +173,7 @@ function writeSseEvent(
 export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
   return new Promise((resolve, reject) => {
     const stateClients = new Set<ServerResponse>();
+    let overlayReady = false;
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
@@ -156,17 +186,30 @@ export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
           // the OS-assigned port (which may differ from the requested one
           // when the launcher passed --port=0).
           port: opts.port,
+          capabilityRequired: opts.capabilityToken !== undefined,
         });
+      }
+
+      if (req.method === "OPTIONS" && isBrowserEndpoint(url.pathname)) {
+        if (!applyStateCors(req, res)) return;
+        res.statusCode = 204;
+        res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
+        res.setHeader("access-control-allow-headers", "authorization");
+        res.setHeader("access-control-max-age", "600");
+        res.end();
+        return;
       }
 
       if (req.method === "GET" && url.pathname === "/state") {
         if (!applyStateCors(req, res)) return;
+        if (!requireCapability(req, res, opts.capabilityToken)) return;
         res.setHeader("cache-control", "no-store");
         return writeJson(res, 200, opts.sessionState.getSnapshot());
       }
 
       if (req.method === "GET" && url.pathname === "/stream") {
         if (!applyStateCors(req, res)) return;
+        if (!requireCapability(req, res, opts.capabilityToken)) return;
         res.statusCode = 200;
         res.setHeader("content-type", "text/event-stream");
         res.setHeader("cache-control", "no-store");
@@ -197,9 +240,28 @@ export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
         return;
       }
 
+      if (req.method === "POST" && url.pathname === "/overlay-ready") {
+        if (!applyStateCors(req, res)) return;
+        if (!requireCapability(req, res, opts.capabilityToken)) return;
+        overlayReady = true;
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/overlay-health") {
+        if (!applyStateCors(req, res)) return;
+        if (!requireCapability(req, res, opts.capabilityToken)) return;
+        return writeJson(res, overlayReady ? 200 : 503, {
+          ok: overlayReady,
+          instanceId: opts.instanceId,
+        });
+      }
+
       if (req.method !== "POST" || url.pathname !== "/event") {
         return writeJson(res, 404, { ok: false, error: "not_found" });
       }
+      if (!requireCapability(req, res, opts.capabilityToken)) return;
 
       const body = await readJsonBody(req);
       if (body === null) {

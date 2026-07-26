@@ -65,6 +65,7 @@ const FAKE_AVATAR_PATH = join(FAKE_DIR, "avatar.cjs");
 const WT_RECORD = join(FAKE_DIR, "wt-record.json");
 const CLAUDE_RECORD = join(FAKE_DIR, "claude-record.json");
 const PIDS_RECORD = join(FAKE_DIR, "fake-avatar-pids.json");
+const ORIGINAL_RENDERER = process.env.CLAUDE_EMOTE_RENDERER;
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -90,6 +91,7 @@ async function waitForProcessExit(
 }
 
 beforeAll(() => {
+  process.env.CLAUDE_EMOTE_RENDERER = "terminal";
   mkdirSync(FAKE_DIR, { recursive: true });
 
   // Fake wt.exe behaviour script. The launcher routes .cjs files through
@@ -228,6 +230,11 @@ server.listen(port, "127.0.0.1", () => {
 });
 
 afterAll(() => {
+  if (ORIGINAL_RENDERER === undefined) {
+    delete process.env.CLAUDE_EMOTE_RENDERER;
+  } else {
+    process.env.CLAUDE_EMOTE_RENDERER = ORIGINAL_RENDERER;
+  }
   try { rmSync(FAKE_DIR, { recursive: true, force: true }); } catch {}
 });
 
@@ -1101,10 +1108,11 @@ process.exit(7);
       // fast, but we assert a generous upper bound to catch regressions
       // where the race waiter is broken and we wait 10s.
       expect(elapsed).toBeLessThan(8_000);
-      // Claude still got the endpoint env + plugin-dir.
+      // Claude starts cleanly without dead companion hooks.
       const claude = readClaudeRecord();
-      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/event$/);
-      expect(claude.argv).toContain("--plugin-dir");
+      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toBeUndefined();
+      expect(claude.env.CLAUDE_EMOTE_CAPABILITY_TOKEN).toBeUndefined();
+      expect(claude.argv).not.toContain("--plugin-dir");
     },
   );
 
@@ -1192,7 +1200,9 @@ server.listen(port, "127.0.0.1", () => {
       expect(res.stderr).toMatch(/did not respond to \/health within 1500ms/);
       // Claude still started.
       const claude = readClaudeRecord();
-      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/event$/);
+      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toBeUndefined();
+      expect(claude.env.CLAUDE_EMOTE_CAPABILITY_TOKEN).toBeUndefined();
+      expect(claude.argv).not.toContain("--plugin-dir");
       // The avatar PID is gone — the launcher terminated it.
       const recorded = JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
       expect(recorded.length).toBeGreaterThanOrEqual(1);

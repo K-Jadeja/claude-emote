@@ -15,6 +15,7 @@ required.
 npm install
 npm run typecheck
 npm test
+npm run overlay:package
 ```
 
 The normal TypeScript build writes `dist/`. The desktop web build writes
@@ -53,7 +54,7 @@ Run:
 npm run overlay:run
 ```
 
-The first vertical slice starts in demo mode and cycles every available pose.
+`npm run overlay:run` starts in demo mode and cycles every available pose.
 Drag the pet to verify native window movement. Close it from the hover controls
 or terminate the command with Ctrl+C.
 
@@ -64,13 +65,10 @@ On Windows, verify once at 100% and once at 125% or 150% display scaling. The
 shell expands the physical window by `devicePixelRatio` so the 272 by 324 CSS
 design surface remains complete.
 
-For a live event-stream run, follow
-`docs/DESKTOP_SESSION_PROTOCOL.md#running-a-live-development-window`.
-
-The live procedure is intentionally contributor-facing. The target end-user
-launcher flow and its acceptance criteria are documented in
-`docs/USER_FLOW.md`. Do not describe the desktop preview as automatically
-connected until those launcher criteria pass.
+For a production-shaped live run, first package the overlay and link the
+checkout, then run `claude-emote --resume`. The launcher owns the endpoint and
+capability; do not copy them into URLs. Protocol details are in
+`docs/DESKTOP_SESSION_PROTOCOL.md`.
 
 ## Test isolation
 

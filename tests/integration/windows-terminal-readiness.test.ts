@@ -64,8 +64,10 @@ const FAKE_CLAUDE_PATH = join(FAKE_DIR, "claude.cjs");
 const FAKE_AVATAR_PATH = join(FAKE_DIR, "avatar-stub.cjs");
 const WT_RECORD = join(FAKE_DIR, "wt-record.json");
 const CLAUDE_RECORD = join(FAKE_DIR, "claude-record.json");
+const ORIGINAL_RENDERER = process.env.CLAUDE_EMOTE_RENDERER;
 
 beforeAll(() => {
+  process.env.CLAUDE_EMOTE_RENDERER = "terminal";
   mkdirSync(FAKE_DIR, { recursive: true });
 
   // Fake wt.exe: records argv, exits immediately (modeling real
@@ -154,6 +156,11 @@ process.exit(0);
 });
 
 afterAll(() => {
+  if (ORIGINAL_RENDERER === undefined) {
+    delete process.env.CLAUDE_EMOTE_RENDERER;
+  } else {
+    process.env.CLAUDE_EMOTE_RENDERER = ORIGINAL_RENDERER;
+  }
   try { rmSync(FAKE_DIR, { recursive: true, force: true }); } catch {}
 });
 
@@ -425,9 +432,9 @@ describe("windows-terminal pane avatar readiness (P8 corrective)", () => {
       const claude: ClaudeRecord = JSON.parse(
         readFileSync(CLAUDE_RECORD, "utf8"),
       );
-      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toBe(
-        `http://127.0.0.1:${wtRecord.port}/event`,
-      );
+      expect(claude.env.CLAUDE_EMOTE_ENDPOINT).toBeUndefined();
+      expect(claude.env.CLAUDE_EMOTE_CAPABILITY_TOKEN).toBeUndefined();
+      expect(claude.argv).not.toContain("--plugin-dir");
     },
   );
 });

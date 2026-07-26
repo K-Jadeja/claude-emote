@@ -24,6 +24,90 @@ const __filename = fileURLToPath(import.meta.url);
 export const PROJECT_ROOT = resolve(dirname(__filename), "..", "..");
 export const DIST = join(PROJECT_ROOT, "dist");
 export const AVATAR_PROCESS = join(DIST, "host", "avatar-process.js");
+export const SESSION_HOST_PROCESS = join(
+  DIST,
+  "host",
+  "session-host-process.js",
+);
+
+export type EmoteRendererMode = "desktop" | "terminal" | "none";
+
+export interface ParsedLauncherArgs {
+  renderer: EmoteRendererMode;
+  claudeArgs: string[];
+}
+
+/**
+ * Consume only claude-emote-owned flags and preserve Claude's argv byte for
+ * byte and in order. Everything after `--` belongs to Claude.
+ */
+export function parseLauncherArgs(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): ParsedLauncherArgs {
+  const envMode = env.CLAUDE_EMOTE_RENDERER?.trim();
+  let renderer: EmoteRendererMode =
+    envMode === undefined || envMode === ""
+      ? env.CLAUDE_EMOTE_TEST_MODE === "1"
+        ? "terminal"
+        : platform === "win32"
+          ? "desktop"
+          : "terminal"
+      : parseRendererMode(envMode, "CLAUDE_EMOTE_RENDERER");
+  let flagMode: EmoteRendererMode | null = null;
+  const claudeArgs: string[] = [];
+  let passthrough = false;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (passthrough) {
+      claudeArgs.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      passthrough = true;
+      claudeArgs.push(arg);
+      continue;
+    }
+
+    let value: string | null = null;
+    if (arg === "--emote-renderer") {
+      value = argv[index + 1] ?? null;
+      if (value === null || value.startsWith("--")) {
+        throw new Error("--emote-renderer requires desktop, terminal, or none");
+      }
+      index += 1;
+    } else if (arg.startsWith("--emote-renderer=")) {
+      value = arg.slice("--emote-renderer=".length);
+    } else if (arg === "--no-emote") {
+      value = "none";
+    }
+
+    if (value === null) {
+      claudeArgs.push(arg);
+      continue;
+    }
+    const parsed = parseRendererMode(value, "--emote-renderer");
+    if (flagMode !== null && flagMode !== parsed) {
+      throw new Error("conflicting claude-emote renderer flags");
+    }
+    flagMode = parsed;
+    renderer = parsed;
+  }
+
+  return { renderer, claudeArgs };
+}
+
+function parseRendererMode(
+  value: string,
+  source: string,
+): EmoteRendererMode {
+  if (value === "desktop" || value === "terminal" || value === "none") {
+    return value;
+  }
+  throw new Error(`${source} must be desktop, terminal, or none`);
+}
 
 /** True for --version / -v. Pure. */
 export function isVersionArgv(argv: string[]): boolean {

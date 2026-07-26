@@ -16,6 +16,7 @@
   "nativeAllowList": [
     "app.exit",
     "debug.log",
+    "os.getEnv",
     "window.beginDrag",
     "window.setAlwaysOnTop",
     "window.setBorderless",

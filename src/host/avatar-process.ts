@@ -77,6 +77,7 @@ import {
   createAvatarOutputPolicy,
   type AvatarOutputPolicy,
 } from "./output-policy.js";
+import { isSessionCapability } from "../shared/session-capability.js";
 
 async function main(): Promise<void> {
   const debug = process.env.CLAUDE_EMOTE_DEBUG === "1";
@@ -120,6 +121,11 @@ async function main(): Promise<void> {
   }
 
   const { instanceId, port, emoteDir, parentPid } = options;
+  const capabilityToken = isSessionCapability(
+    process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN,
+  )
+    ? process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN
+    : undefined;
 
   policy.writeDiagnostic(
     `[avatar-process] instance=${instanceId} port=${port} emoteDir=${emoteDir === "" ? "<automatic>" : emoteDir} parent=${parentPid ?? "null"}\n`,
@@ -303,6 +309,7 @@ async function main(): Promise<void> {
       port,
       onEvent,
       sessionState,
+      capabilityToken,
       policy,
       // Note: avatar-server.ts previously called a separate
       // onMessageDisplayDelta callback. Phase 7 routes talk tokens

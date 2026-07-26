@@ -64,7 +64,9 @@ import { join } from "node:path";
 import {
   PROJECT_ROOT,
   AVATAR_PROCESS,
+  SESSION_HOST_PROCESS,
   isVersionArgv,
+  parseLauncherArgs,
   buildClaudeArgs,
   buildAvatarArgv,
   buildWindowsTerminalArgs,
@@ -75,8 +77,14 @@ import {
   waitForOwnedAvatarStartup,
   waitForEndpointHealth,
   waitForSpawnOutcome,
+  waitForOwnedOverlayStartup,
   terminateOwnedAvatar,
 } from "./startup.js";
+import {
+  buildDesktopOverlaySpawnSpec,
+  resolveDesktopOverlay,
+} from "./desktop-overlay.js";
+import { SESSION_CAPABILITY_ENV } from "../shared/session-capability.js";
 
 export type { SpawnOutcome } from "./startup.js";
 export type { AvatarStartupResult } from "./startup.js";
@@ -154,8 +162,245 @@ function spawnClaude(
   return spawn(exe, args, opts);
 }
 
+function withoutCompanionEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...source };
+  for (const name of [
+    "CLAUDE_EMOTE_INSTANCE_ID",
+    "CLAUDE_EMOTE_ENDPOINT",
+    "CLAUDE_EMOTE_PARENT_PID",
+    "CLAUDE_EMOTE_VISUAL_PANE",
+    SESSION_CAPABILITY_ENV,
+  ]) {
+    delete env[name];
+  }
+  return env;
+}
+
+function runClaudeAndExit(
+  exe: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cleanup: (kind: string) => Promise<void> = async () => {},
+): void {
+  const child = spawnClaude(exe, args, { stdio: "inherit", env });
+  let finalizing = false;
+  const finish = (code: number, kind: string): void => {
+    if (finalizing) return;
+    finalizing = true;
+    void cleanup(kind)
+      .catch((error: unknown) => {
+        console.error(
+          `[claude-emote] WARNING: companion cleanup failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      })
+      .finally(() => process.exit(code));
+  };
+  child.once("close", (code) => finish(code ?? 0, "claude-close"));
+  child.once("error", (error) => {
+    console.error(`[claude-emote] ERROR: Claude failed to start: ${error.message}`);
+    finish(1, "claude-error");
+  });
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      try {
+        child.kill(signal);
+      } catch {}
+      finish(signal === "SIGINT" ? 130 : 143, `signal:${signal}`);
+    });
+  }
+}
+
+async function runDesktopMode(
+  claudeExe: string,
+  claudeArgs: string[],
+  dryRun: boolean,
+  platform: NodeJS.Platform,
+): Promise<void> {
+  let overlayCommand;
+  try {
+    overlayCommand = resolveDesktopOverlay(
+      process.env,
+      platform,
+      process.arch,
+    );
+  } catch (error) {
+    console.error(
+      `[claude-emote] WARNING: desktop pet unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }. Starting Claude without emote hooks.`,
+    );
+    runClaudeAndExit(
+      claudeExe,
+      claudeArgs,
+      withoutCompanionEnv(process.env),
+    );
+    return;
+  }
+
+  const hostScript =
+    process.env.CLAUDE_EMOTE_SESSION_HOST_EXE || SESSION_HOST_PROCESS;
+  if (dryRun) {
+    process.stderr.write(
+      `[claude-emote] dry-run renderer=desktop host=${hostScript} overlay=${overlayCommand.executable} kind=${overlayCommand.kind}\n`,
+    );
+    process.stderr.write(
+      `[claude-emote] dry-run Claude argv: ${JSON.stringify(claudeArgs)}\n`,
+    );
+    process.exit(0);
+    return;
+  }
+
+  const port = await pickPort();
+  const instanceId = randomBytes(6).toString("hex");
+  const capabilityToken = randomBytes(32).toString("base64url");
+  const endpoint = `http://127.0.0.1:${port}/event`;
+  const hostArgv = buildAvatarArgv({
+    scriptPath: hostScript,
+    port,
+    instanceId,
+    emoteDir: null,
+    parentPid: process.pid,
+  });
+  const [hostExecutable, ...hostArgs] = hostArgv;
+  const hostIsScript = /\.(cjs|mjs|js)$/i.test(hostExecutable);
+  const host = spawn(
+    hostIsScript ? process.execPath : hostExecutable,
+    hostIsScript ? [hostExecutable, ...hostArgs] : hostArgs,
+    {
+      env: {
+        ...process.env,
+        [SESSION_CAPABILITY_ENV]: capabilityToken,
+      },
+      detached: false,
+      shell: false,
+      stdio: ["ignore", "ignore", "inherit"],
+      windowsHide: true,
+    },
+  );
+
+  const timeoutRaw = Number.parseInt(
+    process.env.CLAUDE_EMOTE_HEALTH_TIMEOUT_MS ?? "",
+    10,
+  );
+  const timeoutMs =
+    Number.isSafeInteger(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 5_000;
+  const hostStartup = await waitForOwnedAvatarStartup(host, endpoint, timeoutMs);
+  if (hostStartup.status !== "healthy") {
+    await terminateOwnedAvatar(host);
+    console.error(
+      `[claude-emote] WARNING: semantic host failed to start (${hostStartup.status}). Starting Claude without emote hooks.`,
+    );
+    runClaudeAndExit(
+      claudeExe,
+      claudeArgs,
+      withoutCompanionEnv(process.env),
+    );
+    return;
+  }
+
+  const spec = buildDesktopOverlaySpawnSpec(
+    overlayCommand,
+    process.env,
+    endpoint,
+    capabilityToken,
+  );
+  const overlay = spawn(spec.executable, spec.args, spec.options);
+  const overlayStartup = await waitForOwnedOverlayStartup(
+    overlay,
+    endpoint,
+    capabilityToken,
+    timeoutMs,
+  );
+  if (overlayStartup.status !== "healthy") {
+    await Promise.all([
+      terminateOwnedAvatar(overlay),
+      terminateOwnedAvatar(host),
+    ]);
+    console.error(
+      `[claude-emote] WARNING: desktop pet failed to render (${overlayStartup.status}). Starting Claude without emote hooks.`,
+    );
+    runClaudeAndExit(
+      claudeExe,
+      claudeArgs,
+      withoutCompanionEnv(process.env),
+    );
+    return;
+  }
+
+  const childEnv = withoutCompanionEnv(process.env);
+  childEnv.CLAUDE_EMOTE_INSTANCE_ID = instanceId;
+  childEnv.CLAUDE_EMOTE_ENDPOINT = endpoint;
+  childEnv.CLAUDE_EMOTE_PARENT_PID = String(process.pid);
+  childEnv[SESSION_CAPABILITY_ENV] = capabilityToken;
+  const finalArgs = buildClaudeArgs(claudeArgs, PROJECT_ROOT);
+  dbg(`desktop pet ready; claude argv: ${finalArgs.join(" ")}`);
+
+  runClaudeAndExit(claudeExe, finalArgs, childEnv, async (kind) => {
+    if (kind === "claude-close") {
+      const raw = Number.parseInt(
+        process.env.CLAUDE_EMOTE_ENDED_DISPLAY_MS ?? "",
+        10,
+      );
+      const grace = Number.isSafeInteger(raw) && raw >= 0 && raw <= 5_000
+        ? raw
+        : 900;
+      await new Promise<void>((resolve) => setTimeout(resolve, grace));
+    }
+    await Promise.all([
+      terminateOwnedAvatar(overlay),
+      terminateOwnedAvatar(host),
+    ]);
+  });
+}
+
 async function main(): Promise<void> {
-  const claudeArgs = process.argv.slice(2);
+  const platform = effectivePlatform();
+  if (
+    process.argv.length === 3 &&
+    process.argv[2] === "--emote-doctor"
+  ) {
+    const claudeExe = resolveClaudeExe();
+    let overlay = "";
+    let overlayError = "";
+    try {
+      const resolved = resolveDesktopOverlay(
+        process.env,
+        platform,
+        process.arch,
+      );
+      overlay = `${resolved.kind}: ${resolved.executable}`;
+    } catch (error) {
+      overlayError = error instanceof Error ? error.message : String(error);
+    }
+    const hostOk = existsSync(SESSION_HOST_PROCESS);
+    process.stdout.write(
+      [
+        "claude-emote doctor",
+        `platform: ${platform}/${process.arch}`,
+        `claude: ${claudeExe ?? "NOT FOUND"}`,
+        `semantic host: ${hostOk ? "ok" : "MISSING"}`,
+        `desktop overlay: ${overlay || `UNAVAILABLE (${overlayError})`}`,
+        "session capability: generated per launch (value intentionally hidden)",
+      ].join("\n") + "\n",
+    );
+    process.exit(claudeExe && hostOk && overlay ? 0 : 1);
+    return;
+  }
+  let parsed;
+  try {
+    parsed = parseLauncherArgs(process.argv.slice(2), process.env, platform);
+  } catch (error) {
+    console.error(
+      `[claude-emote] ERROR: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    process.exit(2);
+    return;
+  }
+  const { claudeArgs, renderer } = parsed;
   const dryRun = process.env.CLAUDE_EMOTE_DRY_RUN === "1";
 
   if (isVersionArgv(claudeArgs)) {
@@ -180,6 +425,27 @@ async function main(): Promise<void> {
     process.exit(127);
   }
 
+  if (renderer === "none") {
+    if (dryRun) {
+      process.stderr.write(
+        `[claude-emote] dry-run renderer=none Claude argv: ${JSON.stringify(claudeArgs)}\n`,
+      );
+      process.exit(0);
+      return;
+    }
+    runClaudeAndExit(
+      claudeExe,
+      claudeArgs,
+      withoutCompanionEnv(process.env),
+    );
+    return;
+  }
+
+  if (renderer === "desktop") {
+    await runDesktopMode(claudeExe, claudeArgs, dryRun, platform);
+    return;
+  }
+
   const port = await pickPort();
   const instanceId = randomBytes(6).toString("hex");
   const endpoint = `http://127.0.0.1:${port}/event`;
@@ -202,7 +468,7 @@ async function main(): Promise<void> {
   const userCwd = process.cwd();
 
   const testMode = process.env.CLAUDE_EMOTE_TEST_MODE === "1";
-  const platform = effectivePlatform();
+  const capabilityToken = randomBytes(32).toString("base64url");
 
   // Resolve wt.exe lazily for the launch decision (test mode never
   // looks it up). On non-Windows we still call the resolver so the
@@ -282,6 +548,10 @@ async function main(): Promise<void> {
       [avatarScript, ...avatarScriptArgs],
       {
         stdio: ["ignore", "inherit", "inherit"],
+        env: {
+          ...process.env,
+          [SESSION_CAPABILITY_ENV]: capabilityToken,
+        },
       },
     );
   };
@@ -328,6 +598,7 @@ async function main(): Promise<void> {
     const wtSpawnEnv: NodeJS.ProcessEnv = {
       ...process.env,
       CLAUDE_EMOTE_VISUAL_PANE: "1",
+      [SESSION_CAPABILITY_ENV]: capabilityToken,
     };
     const wtChild = spawn(spawnExe, spawnArgs, {
       shell: false,
@@ -469,6 +740,7 @@ async function main(): Promise<void> {
     CLAUDE_EMOTE_INSTANCE_ID: instanceId,
     CLAUDE_EMOTE_ENDPOINT: endpoint,
     CLAUDE_EMOTE_PARENT_PID: String(process.pid),
+    [SESSION_CAPABILITY_ENV]: capabilityToken,
   };
   // Phase 10.1: the visual-pane flag is strictly scoped to the WT
   // pane child. Strip it from Claude's environment even if the
@@ -476,7 +748,19 @@ async function main(): Promise<void> {
   // observe a value meant only for the avatar pane.
   delete childEnv.CLAUDE_EMOTE_VISUAL_PANE;
 
-  const finalClaudeArgs = buildClaudeArgs(claudeArgs, PROJECT_ROOT);
+  const finalClaudeArgs = startupHealthy
+    ? buildClaudeArgs(claudeArgs, PROJECT_ROOT)
+    : claudeArgs;
+  if (!startupHealthy) {
+    for (const name of [
+      "CLAUDE_EMOTE_INSTANCE_ID",
+      "CLAUDE_EMOTE_ENDPOINT",
+      "CLAUDE_EMOTE_PARENT_PID",
+      SESSION_CAPABILITY_ENV,
+    ]) {
+      delete childEnv[name];
+    }
+  }
   dbg(`claude argv: ${finalClaudeArgs.join(" ")}`);
 
   const child = spawnClaude(claudeExe, finalClaudeArgs, {

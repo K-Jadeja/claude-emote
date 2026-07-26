@@ -1,9 +1,13 @@
 import { createDemoController } from "./demo-controller";
 import { createDemoStates } from "./pet-state";
 import { createPetShell } from "./shell";
-import { createPetView } from "./pet-view";
+import { createPetView, waitForImageRender } from "./pet-view";
 import { protectInteractiveRegionFromWindowDrag } from "./pointer-guard";
-import { createSessionStreamClient } from "./session-stream-client";
+import {
+  createSessionStreamClient,
+  notifyOverlayReady,
+} from "./session-stream-client";
+import { SESSION_CAPABILITY_ENV } from "../../src/shared/session-capability";
 import type { PetSessionState } from "../../src/shared/pet-session-state";
 
 function requiredElement<T extends HTMLElement>(selector: string): T {
@@ -20,7 +24,6 @@ async function main(): Promise<void> {
   const closeButton = requiredElement<HTMLButtonElement>("#close-button");
   const shell = createPetShell();
   const view = createPetView(root);
-  const endpoint = new URL(globalThis.location.href).searchParams.get("endpoint");
   let disposeMode: () => void = () => {};
 
   protectInteractiveRegionFromWindowDrag(controls);
@@ -36,7 +39,18 @@ async function main(): Promise<void> {
   }
 
   try {
+    const endpoint =
+      (await shell.getEnvironmentValue("CLAUDE_EMOTE_ENDPOINT")) ??
+      new URL(globalThis.location.href).searchParams.get("endpoint");
+    const capabilityToken = await shell.getEnvironmentValue(
+      SESSION_CAPABILITY_ENV,
+    );
     if (endpoint) {
+      if (!capabilityToken) {
+        throw new Error(
+          `${SESSION_CAPABILITY_ENV} is required for a live Claude Pet session`,
+        );
+      }
       view.setMode("live");
       let currentState: PetSessionState = {
         sessionId: "connecting",
@@ -46,14 +60,51 @@ async function main(): Promise<void> {
         timestamp: Date.now(),
       };
       view.render(currentState, 0, 0);
+      let readinessSent = false;
+      let readinessPending = false;
+      let streamConnected = false;
+      let hasAuthoritativeState = false;
+      const markReadyAfterRender = (): void => {
+        if (
+          readinessSent ||
+          readinessPending ||
+          !streamConnected ||
+          !hasAuthoritativeState
+        ) {
+          return;
+        }
+        readinessPending = true;
+        const image = requiredElement<HTMLImageElement>("#pet-image");
+        void waitForImageRender(image)
+          .then(() => notifyOverlayReady(endpoint, capabilityToken))
+          .then(() => {
+            readinessSent = true;
+          })
+          .catch((error: unknown) => {
+            void shell.reportError(
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          })
+          .finally(() => {
+            readinessPending = false;
+          });
+      };
       const stream = createSessionStreamClient({
         endpoint,
+        capabilityToken,
         onState(state) {
           currentState = state;
           view.render(state, 0, 0);
+          hasAuthoritativeState = true;
+          markReadyAfterRender();
         },
         onConnectionChange(connected) {
-          if (connected || currentState.status === "ended") return;
+          streamConnected = connected;
+          if (connected) {
+            markReadyAfterRender();
+            return;
+          }
+          if (currentState.status === "ended") return;
           currentState = {
             ...currentState,
             status: "disconnected",
