@@ -62,7 +62,7 @@ import {
   existsSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
-import { join, resolve, normalize, sep } from "node:path";
+import { basename, join, resolve, normalize, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { request } from "node:http";
@@ -447,7 +447,9 @@ const http = require("node:http");
 fs.writeFileSync(process.env.DESKTOP_CLAUDE_RECORD, JSON.stringify({
   argv: process.argv.slice(2),
   endpoint: process.env.CLAUDE_EMOTE_ENDPOINT || null,
-  capability: process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN || null
+  capability: process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN || null,
+  sessionLabel: process.env.CLAUDE_EMOTE_SESSION_LABEL || null,
+  hideSessionLabel: process.env.CLAUDE_EMOTE_HIDE_SESSION_LABEL || null
 }));
 const url = new URL(process.env.CLAUDE_EMOTE_ENDPOINT);
 const token = process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN;
@@ -476,6 +478,8 @@ fs.writeFileSync(process.env.DESKTOP_OVERLAY_RECORD, JSON.stringify({
   pid: process.pid,
   argv: process.argv.slice(2),
   endpoint,
+  sessionLabel: process.env.CLAUDE_EMOTE_SESSION_LABEL || null,
+  hideSessionLabel: process.env.CLAUDE_EMOTE_HIDE_SESSION_LABEL || null,
   tokenPresent: Boolean(token),
   tokenInArgv: process.argv.some((value) => value.includes(token || "__missing__"))
 }));
@@ -536,6 +540,18 @@ req.end();
     check(
       "installed desktop launcher supplies a capability",
       /^[A-Za-z0-9_-]{43}$/.test(desktopClaudeState.capability),
+    );
+    check(
+      "installed Claude child does not inherit overlay identity",
+      desktopClaudeState.sessionLabel === null &&
+        desktopClaudeState.hideSessionLabel === null,
+      JSON.stringify(desktopClaudeState),
+    );
+    check(
+      "installed overlay receives only the cwd basename as identity",
+      desktopOverlayState.sessionLabel === basename(installDir) &&
+        desktopOverlayState.hideSessionLabel === null,
+      JSON.stringify(desktopOverlayState),
     );
     check(
       "installed overlay receives no endpoint or capability in argv",

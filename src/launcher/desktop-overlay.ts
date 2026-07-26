@@ -3,6 +3,10 @@ import { dirname, extname, join, resolve } from "node:path";
 import type { SpawnOptions } from "node:child_process";
 import { PROJECT_ROOT } from "./args.js";
 import { SESSION_CAPABILITY_ENV } from "../shared/session-capability.js";
+import {
+  HIDE_SESSION_LABEL_ENV,
+  SESSION_LABEL_ENV,
+} from "../shared/session-label.js";
 
 export interface DesktopOverlayCommand {
   executable: string;
@@ -80,16 +84,24 @@ export function buildDesktopOverlaySpawnSpec(
   parentEnv: NodeJS.ProcessEnv,
   endpoint: string,
   capabilityToken: string,
+  sessionLabel: string | null,
 ): DesktopOverlaySpawnSpec {
+  const overlayEnv = { ...parentEnv };
+  delete overlayEnv[SESSION_LABEL_ENV];
+  delete overlayEnv[HIDE_SESSION_LABEL_ENV];
+  overlayEnv.CLAUDE_EMOTE_ENDPOINT = endpoint;
+  overlayEnv[SESSION_CAPABILITY_ENV] = capabilityToken;
+  if (sessionLabel === null) {
+    overlayEnv[HIDE_SESSION_LABEL_ENV] = "1";
+  } else {
+    overlayEnv[SESSION_LABEL_ENV] = sessionLabel;
+  }
+
   return {
     ...command,
     options: {
       cwd: command.cwd,
-      env: {
-        ...parentEnv,
-        CLAUDE_EMOTE_ENDPOINT: endpoint,
-        [SESSION_CAPABILITY_ENV]: capabilityToken,
-      },
+      env: overlayEnv,
       detached: false,
       shell: false,
       stdio: "ignore",

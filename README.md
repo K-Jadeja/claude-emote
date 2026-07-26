@@ -56,6 +56,7 @@ about 4 MB before installer packaging or signing. Electron is not required.
 | Permission-needed and session-ended states | Working |
 | Window dragging and position persistence | Working |
 | Windows display scaling | Tested |
+| Short privacy-safe project label | Working |
 | Packaged Windows executable | Builds and launches |
 | One-command automatic desktop launch | Working on Windows x64 |
 | Installer, tray, signing, auto-update | Not implemented |
@@ -218,7 +219,7 @@ The expected experience is:
 2. The pet changes pose from real Claude lifecycle events.
 3. A strong attention state appears when permission or input is required.
 4. Closing Claude ends the session and lets the pet rest briefly before
-   closing, unless the user has pinned it.
+   closing.
 5. Starting another `claude-emote` session creates another identified pet.
 6. A later tray or "nest" UI can group multiple sessions without changing the
    hook or semantic-state contracts.
@@ -301,6 +302,8 @@ configuration. The launcher also recognizes:
 | `CLAUDE_EMOTE_CAPABILITY_TOKEN` | Internal per-session bearer capability; never put in URLs or logs |
 | `CLAUDE_EMOTE_PARENT_PID` | Launcher PID used for orphan cleanup |
 | `CLAUDE_EMOTE_RENDERER` | Optional `desktop`, `terminal`, or `none` default |
+| `CLAUDE_EMOTE_SESSION_LABEL` | Optional desktop label; defaults to the current directory name, limited to 48 visible characters |
+| `CLAUDE_EMOTE_HIDE_SESSION_LABEL=1` | Hide desktop session identity entirely |
 | `CLAUDE_EMOTE_DEBUG=1` | Verbose diagnostic logging |
 | `CLAUDE_EMOTE_CHAFA_PATH` | Explicit `chafa.exe` path |
 | `CLAUDE_EMOTE_EMOTE_DIR` | Explicit custom terminal emote directory |
@@ -311,6 +314,25 @@ configuration. The launcher also recognizes:
 
 Variables described as launcher-owned are internal protocol. End users should
 not need to set them in the finished desktop flow.
+
+The default session label contains only the final directory name. For example,
+launching from `D:\work\client-a` shows `client-a`; the full path never enters
+the desktop protocol, command line, or logs. Set a temporary custom label in
+PowerShell before launching:
+
+```powershell
+$env:CLAUDE_EMOTE_SESSION_LABEL = "Website redesign"
+claude-emote --resume
+Remove-Item Env:CLAUDE_EMOTE_SESSION_LABEL
+```
+
+To show no project identity:
+
+```powershell
+$env:CLAUDE_EMOTE_HIDE_SESSION_LABEL = "1"
+claude-emote
+Remove-Item Env:CLAUDE_EMOTE_HIDE_SESSION_LABEL
+```
 
 ## Updating Claude Code and Claude Emote
 

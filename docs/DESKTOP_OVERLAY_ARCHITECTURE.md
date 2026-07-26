@@ -65,6 +65,20 @@ Neutralino shell adapter
 The overlay protocol must not include prompt content, completion content, tool
 arguments, tool results, or environment variables.
 
+## Presentation-only session identity
+
+The launcher derives the default pet label from only the final component of
+its current working directory. It normalizes, removes unsafe control
+characters, and limits the result to 48 Unicode code points before starting
+another process. The original path is neither retained nor transported.
+
+This label is passed only in the native overlay child's environment. It does
+not enter the renderer-free host, Claude child, hook child, URLs, argv, logs,
+HTTP snapshot, or SSE stream. An explicit hide marker follows the same
+overlay-only route. If no presentation label is available, the UI may show at
+most the first eight characters of the semantic session ID; it must never
+render the full opaque ID.
+
 ## Source layout
 
 ```text

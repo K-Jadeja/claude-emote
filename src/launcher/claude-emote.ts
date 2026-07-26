@@ -85,6 +85,11 @@ import {
   resolveDesktopOverlay,
 } from "./desktop-overlay.js";
 import { SESSION_CAPABILITY_ENV } from "../shared/session-capability.js";
+import {
+  HIDE_SESSION_LABEL_ENV,
+  SESSION_LABEL_ENV,
+} from "../shared/session-label.js";
+import { resolveSessionLabel } from "./session-label.js";
 
 export type { SpawnOutcome } from "./startup.js";
 export type { AvatarStartupResult } from "./startup.js";
@@ -169,6 +174,8 @@ function withoutCompanionEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     "CLAUDE_EMOTE_ENDPOINT",
     "CLAUDE_EMOTE_PARENT_PID",
     "CLAUDE_EMOTE_VISUAL_PANE",
+    SESSION_LABEL_ENV,
+    HIDE_SESSION_LABEL_ENV,
     SESSION_CAPABILITY_ENV,
   ]) {
     delete env[name];
@@ -219,12 +226,14 @@ async function runDesktopMode(
   platform: NodeJS.Platform,
 ): Promise<void> {
   let overlayCommand;
+  let sessionLabel: string | null;
   try {
     overlayCommand = resolveDesktopOverlay(
       process.env,
       platform,
       process.arch,
     );
+    sessionLabel = resolveSessionLabel(process.cwd(), process.env);
   } catch (error) {
     console.error(
       `[claude-emote] WARNING: desktop pet unavailable: ${
@@ -265,14 +274,13 @@ async function runDesktopMode(
   });
   const [hostExecutable, ...hostArgs] = hostArgv;
   const hostIsScript = /\.(cjs|mjs|js)$/i.test(hostExecutable);
+  const hostEnv = withoutCompanionEnv(process.env);
+  hostEnv[SESSION_CAPABILITY_ENV] = capabilityToken;
   const host = spawn(
     hostIsScript ? process.execPath : hostExecutable,
     hostIsScript ? [hostExecutable, ...hostArgs] : hostArgs,
     {
-      env: {
-        ...process.env,
-        [SESSION_CAPABILITY_ENV]: capabilityToken,
-      },
+      env: hostEnv,
       detached: false,
       shell: false,
       stdio: ["ignore", "ignore", "inherit"],
@@ -305,6 +313,7 @@ async function runDesktopMode(
     process.env,
     endpoint,
     capabilityToken,
+    sessionLabel,
   );
   const overlay = spawn(spec.executable, spec.args, spec.options);
   const overlayStartup = await waitForOwnedOverlayStartup(
@@ -543,15 +552,14 @@ async function main(): Promise<void> {
    * no unref. The handle is owned by the launcher.
    */
   const spawnAttachedAvatar = (): ChildProcess => {
+    const avatarEnv = withoutCompanionEnv(process.env);
+    avatarEnv[SESSION_CAPABILITY_ENV] = capabilityToken;
     return spawn(
       process.execPath,
       [avatarScript, ...avatarScriptArgs],
       {
         stdio: ["ignore", "inherit", "inherit"],
-        env: {
-          ...process.env,
-          [SESSION_CAPABILITY_ENV]: capabilityToken,
-        },
+        env: avatarEnv,
       },
     );
   };
@@ -595,11 +603,9 @@ async function main(): Promise<void> {
     // Readiness is observed through /health instead. This env is
     // NOT added to the Claude child's environment below; it is
     // strictly scoped to the WT pane spawn.
-    const wtSpawnEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      CLAUDE_EMOTE_VISUAL_PANE: "1",
-      [SESSION_CAPABILITY_ENV]: capabilityToken,
-    };
+    const wtSpawnEnv = withoutCompanionEnv(process.env);
+    wtSpawnEnv.CLAUDE_EMOTE_VISUAL_PANE = "1";
+    wtSpawnEnv[SESSION_CAPABILITY_ENV] = capabilityToken;
     const wtChild = spawn(spawnExe, spawnArgs, {
       shell: false,
       detached: false,
@@ -735,13 +741,11 @@ async function main(): Promise<void> {
     }
   }
 
-  const childEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    CLAUDE_EMOTE_INSTANCE_ID: instanceId,
-    CLAUDE_EMOTE_ENDPOINT: endpoint,
-    CLAUDE_EMOTE_PARENT_PID: String(process.pid),
-    [SESSION_CAPABILITY_ENV]: capabilityToken,
-  };
+  const childEnv = withoutCompanionEnv(process.env);
+  childEnv.CLAUDE_EMOTE_INSTANCE_ID = instanceId;
+  childEnv.CLAUDE_EMOTE_ENDPOINT = endpoint;
+  childEnv.CLAUDE_EMOTE_PARENT_PID = String(process.pid);
+  childEnv[SESSION_CAPABILITY_ENV] = capabilityToken;
   // Phase 10.1: the visual-pane flag is strictly scoped to the WT
   // pane child. Strip it from Claude's environment even if the
   // caller had it set globally, so Claude (and its hooks) never

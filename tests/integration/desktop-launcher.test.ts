@@ -29,7 +29,9 @@ const http = require("node:http");
 fs.writeFileSync(process.env.CLAUDE_RECORD, JSON.stringify({
   argv: process.argv.slice(2),
   endpoint: process.env.CLAUDE_EMOTE_ENDPOINT || null,
-  capability: process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN || null
+  capability: process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN || null,
+  sessionLabel: process.env.CLAUDE_EMOTE_SESSION_LABEL || null,
+  hideSessionLabel: process.env.CLAUDE_EMOTE_HIDE_SESSION_LABEL || null
 }));
 const endpoint = process.env.CLAUDE_EMOTE_ENDPOINT;
 const token = process.env.CLAUDE_EMOTE_CAPABILITY_TOKEN;
@@ -59,6 +61,8 @@ fs.writeFileSync(process.env.OVERLAY_RECORD, JSON.stringify({
   pid: process.pid,
   argv: process.argv.slice(2),
   endpoint,
+  sessionLabel: process.env.CLAUDE_EMOTE_SESSION_LABEL || null,
+  hideSessionLabel: process.env.CLAUDE_EMOTE_HIDE_SESSION_LABEL || null,
   tokenPresent: Boolean(token),
   tokenInArgv: process.argv.some((arg) => arg.includes(token || "__missing__"))
 }));
@@ -125,13 +129,42 @@ describe("one-command desktop launcher", () => {
     expect(claude.argv).toContain("--plugin-dir");
     expect(claude.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/event$/);
     expect(claude.capability).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(claude.sessionLabel).toBeNull();
+    expect(claude.hideSessionLabel).toBeNull();
 
     const overlay = JSON.parse(readFileSync(OVERLAY_RECORD, "utf8"));
+    expect(overlay.sessionLabel).toBe("claudecodeavatar");
+    expect(overlay.hideSessionLabel).toBeNull();
     expect(overlay.tokenPresent).toBe(true);
     expect(overlay.tokenInArgv).toBe(false);
     expect(overlay.argv.join(" ")).not.toContain(overlay.endpoint);
     await new Promise((resolveWait) => setTimeout(resolveWait, 150));
     expect(() => process.kill(overlay.pid, 0)).toThrow();
+  }, 20_000);
+
+  it("honors an explicit private label without leaking its config to Claude", async () => {
+    const result = await run([], {
+      CLAUDE_EMOTE_SESSION_LABEL: "  Private pet  ",
+      CLAUDE_EXIT: "0",
+    });
+    expect(result.code).toBe(0);
+    const overlay = JSON.parse(readFileSync(OVERLAY_RECORD, "utf8"));
+    expect(overlay.sessionLabel).toBe("Private pet");
+    const claude = JSON.parse(readFileSync(CLAUDE_RECORD, "utf8"));
+    expect(claude.sessionLabel).toBeNull();
+  }, 20_000);
+
+  it("passes the hide decision only to the overlay", async () => {
+    const result = await run([], {
+      CLAUDE_EMOTE_HIDE_SESSION_LABEL: "1",
+      CLAUDE_EXIT: "0",
+    });
+    expect(result.code).toBe(0);
+    const overlay = JSON.parse(readFileSync(OVERLAY_RECORD, "utf8"));
+    expect(overlay.sessionLabel).toBeNull();
+    expect(overlay.hideSessionLabel).toBe("1");
+    const claude = JSON.parse(readFileSync(CLAUDE_RECORD, "utf8"));
+    expect(claude.hideSessionLabel).toBeNull();
   }, 20_000);
 
   it("runs Claude cleanly without hooks when the overlay cannot render", async () => {

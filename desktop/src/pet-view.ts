@@ -1,11 +1,13 @@
 import {
   STATUS_LABELS,
+  formatSessionLabel,
   getPose,
   type PetState,
 } from "./pet-state";
 
 export interface PetView {
   render(state: PetState, step: number, totalSteps: number): void;
+  setSessionLabel(label: string | null, hidden?: boolean): void;
   setMode(mode: "demo" | "live"): void;
   setPaused(paused: boolean): void;
   showFatal(message: string): void;
@@ -43,6 +45,18 @@ export function createPetView(root: HTMLElement): PetView {
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   let frameTimer: ReturnType<typeof setInterval> | null = null;
   let renderVersion = 0;
+  let currentSessionId = "demo";
+  let preferredSessionLabel: string | null = null;
+  let sessionLabelHidden = false;
+
+  function updateSessionLabel(): void {
+    sessionLabel.textContent = formatSessionLabel(
+      currentSessionId,
+      preferredSessionLabel,
+      sessionLabelHidden,
+    );
+    sessionLabel.hidden = sessionLabelHidden;
+  }
 
   function stopFrames(): void {
     if (frameTimer !== null) {
@@ -74,8 +88,8 @@ export function createPetView(root: HTMLElement): PetView {
     root.dataset.health = "ok";
     statusLabel.textContent = STATUS_LABELS[state.status];
     activityLabel.textContent = pose.label;
-    sessionLabel.textContent =
-      state.sessionId === "demo" ? "demo session" : state.sessionId;
+    currentSessionId = state.sessionId;
+    updateSessionLabel();
     stepLabel.textContent =
       totalSteps > 0
         ? `${String(step + 1).padStart(2, "0")} / ${String(totalSteps).padStart(
@@ -97,6 +111,11 @@ export function createPetView(root: HTMLElement): PetView {
 
   return {
     render,
+    setSessionLabel(label, hidden = false) {
+      preferredSessionLabel = label;
+      sessionLabelHidden = hidden;
+      updateSessionLabel();
+    },
     setMode(mode) {
       root.dataset.mode = mode;
       root.setAttribute(

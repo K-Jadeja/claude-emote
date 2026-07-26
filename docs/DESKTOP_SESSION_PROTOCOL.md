@@ -68,6 +68,12 @@ These are the only permitted fields. The server and client reject unknown
 fields, so prompts, output, tool details, paths, configuration, and credentials
 cannot accidentally cross the overlay boundary.
 
+The human-readable project label is intentionally not a sixth state field. It
+is presentation metadata derived and sanitized by the launcher, then passed
+only through the native overlay child's environment. The full working
+directory is never transported. This separation keeps reconnect snapshots,
+SSE events, hooks, and host logs project-path-free.
+
 ## Browser-origin policy
 
 Browser requests are accepted only from loopback origins. Native and CLI

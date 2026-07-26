@@ -46,17 +46,19 @@ Version one is one transparent, always-on-top pet for one Claude session:
 - see a clear attention state when Claude needs input;
 - retain the last position;
 - reconnect automatically if the session process briefly disappears;
-- close automatically when its owning session ends, unless pinned.
+- show a short project label without transporting the full project path;
+- close automatically when its owning session ends.
 
 The existing terminal avatar remains a supported renderer.
 
-The current repository has proven the native window and live semantic stream
-separately. Automatic launcher-to-overlay orchestration is the remaining gate
-before this initial experience is complete. See `docs/USER_FLOW.md`.
+The current Windows slice has proven automatic launcher-to-overlay
+orchestration, authenticated live state, visible window recovery, and
+privacy-safe session identity. See `docs/USER_FLOW.md`.
 
 ## Later, without redesigning the core
 
-- One pet per session, with a short project label.
+- Multi-pet layout and terminal focus coordination.
+- Optional pinning with explicit post-session process ownership.
 - A small nest or dock that groups several sessions.
 - Replaceable character packs with a documented manifest.
 - Reduced-motion and accessibility modes.

@@ -19,6 +19,8 @@ claude-emote --resume
 
 Debug output may include process kinds, ports, instance IDs, and failure
 statuses. It must never include prompts, hook payloads, or capability tokens.
+It also never includes the full working directory or configured session label;
+the default pet label contains only the final directory name.
 
 Use `--emote-doctor` rather than a bare `doctor` subcommand so a current or
 future `claude doctor` argument remains available to the real Claude CLI.

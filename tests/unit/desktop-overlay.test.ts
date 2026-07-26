@@ -49,13 +49,57 @@ describe("desktop overlay resolution", () => {
       {},
       "http://127.0.0.1:3210/event",
       TOKEN,
+      "gp2",
     );
     expect(spec.args.join(" ")).not.toContain(TOKEN);
     expect(spec.args.join(" ")).not.toContain("3210");
     expect(spec.options.env?.CLAUDE_EMOTE_ENDPOINT).toContain("3210");
     expect(spec.options.env?.CLAUDE_EMOTE_CAPABILITY_TOKEN).toBe(TOKEN);
+    expect(spec.options.env?.CLAUDE_EMOTE_SESSION_LABEL).toBe("gp2");
     // Regression: windowsHide also hides Neutralino's GUI window even though
     // the process and taskbar icon remain alive.
     expect(spec.options.windowsHide).toBe(false);
+  });
+
+  it("replaces untrusted parent label settings with the resolved value", () => {
+    const command = {
+      executable: process.execPath,
+      args: ["fake-overlay.js"],
+      cwd: "C:\\tmp",
+      kind: "override" as const,
+    };
+    const spec = buildDesktopOverlaySpawnSpec(
+      command,
+      {
+        CLAUDE_EMOTE_SESSION_LABEL: "D:\\private\\full\\path",
+        CLAUDE_EMOTE_HIDE_SESSION_LABEL: "1",
+      },
+      "http://127.0.0.1:3210/event",
+      TOKEN,
+      "safe-project",
+    );
+    expect(spec.options.env?.CLAUDE_EMOTE_SESSION_LABEL).toBe("safe-project");
+    expect(spec.options.env?.CLAUDE_EMOTE_HIDE_SESSION_LABEL).toBeUndefined();
+    expect(JSON.stringify(spec.options.env)).not.toContain(
+      "D:\\\\private\\\\full\\\\path",
+    );
+  });
+
+  it("passes only an explicit hide marker when identity is disabled", () => {
+    const command = {
+      executable: process.execPath,
+      args: [],
+      cwd: "C:\\tmp",
+      kind: "override" as const,
+    };
+    const spec = buildDesktopOverlaySpawnSpec(
+      command,
+      {},
+      "http://127.0.0.1:3210/event",
+      TOKEN,
+      null,
+    );
+    expect(spec.options.env?.CLAUDE_EMOTE_SESSION_LABEL).toBeUndefined();
+    expect(spec.options.env?.CLAUDE_EMOTE_HIDE_SESSION_LABEL).toBe("1");
   });
 });

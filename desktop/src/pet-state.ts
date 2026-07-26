@@ -81,3 +81,14 @@ export function createDemoStates(now = Date.now()): PetState[] {
     timestamp: now + index,
   }));
 }
+
+export function formatSessionLabel(
+  sessionId: string,
+  preferredLabel: string | null,
+  hidden = false,
+): string {
+  if (hidden) return "";
+  if (preferredLabel) return preferredLabel;
+  if (sessionId === "demo") return "demo session";
+  return `session ${Array.from(sessionId).slice(0, 8).join("")}`;
+}

@@ -8,6 +8,10 @@ import {
   notifyOverlayReady,
 } from "./session-stream-client";
 import { SESSION_CAPABILITY_ENV } from "../../src/shared/session-capability";
+import {
+  HIDE_SESSION_LABEL_ENV,
+  SESSION_LABEL_ENV,
+} from "../../src/shared/session-label";
 import type { PetSessionState } from "../../src/shared/pet-session-state";
 
 function requiredElement<T extends HTMLElement>(selector: string): T {
@@ -39,12 +43,16 @@ async function main(): Promise<void> {
   }
 
   try {
+    const [environmentEndpoint, capabilityToken, sessionLabel, hideLabel] =
+      await Promise.all([
+        shell.getEnvironmentValue("CLAUDE_EMOTE_ENDPOINT"),
+        shell.getEnvironmentValue(SESSION_CAPABILITY_ENV),
+        shell.getEnvironmentValue(SESSION_LABEL_ENV),
+        shell.getEnvironmentValue(HIDE_SESSION_LABEL_ENV),
+      ]);
     const endpoint =
-      (await shell.getEnvironmentValue("CLAUDE_EMOTE_ENDPOINT")) ??
+      environmentEndpoint ??
       new URL(globalThis.location.href).searchParams.get("endpoint");
-    const capabilityToken = await shell.getEnvironmentValue(
-      SESSION_CAPABILITY_ENV,
-    );
     if (endpoint) {
       if (!capabilityToken) {
         throw new Error(
@@ -52,6 +60,7 @@ async function main(): Promise<void> {
         );
       }
       view.setMode("live");
+      view.setSessionLabel(sessionLabel, hideLabel === "1");
       let currentState: PetSessionState = {
         sessionId: "connecting",
         sequence: 0,

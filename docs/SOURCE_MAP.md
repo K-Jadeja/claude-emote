@@ -69,6 +69,7 @@ fails the script.
 | `src/launcher/args.ts`                   | `NEW_ADAPTER` | Pure wrapper parsing plus Claude, host, and terminal argument construction. |
 | `src/launcher/claude-emote.ts`           | `NEW_ADAPTER` | CLI entry point and supervised desktop/terminal/none lifecycle. |
 | `src/launcher/desktop-overlay.ts`        | `NEW_ADAPTER` | Resolves packaged/dev native runtimes and builds secret-free spawn arguments. |
+| `src/launcher/session-label.ts`          | `NEW_ADAPTER` | Derives and sanitizes a bounded presentation label without retaining a full project path. |
 | `src/launcher/startup.ts`                | `NEW_ADAPTER` | Import-safe process readiness and owned-child cleanup helpers. |
 
 ### `src/shared/`
@@ -80,6 +81,7 @@ fails the script.
 | `src/shared/pet-session-state.ts` | `NEW_ADAPTER` | Defines and strictly validates the privacy-minimal desktop protocol. |
 | `src/shared/project-paths.ts` | `NEW_ADAPTER` | Resolves package paths consistently in source, build, and installed layouts. |
 | `src/shared/session-capability.ts` | `NEW_ADAPTER` | Shared validation and authorization-header construction for per-session tokens. |
+| `src/shared/session-label.ts` | `NEW_ADAPTER` | Shared names for overlay-only session identity environment values. |
 
 ### `desktop/`
 
