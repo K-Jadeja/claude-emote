@@ -66,6 +66,29 @@ const WT_RECORD = join(FAKE_DIR, "wt-record.json");
 const CLAUDE_RECORD = join(FAKE_DIR, "claude-record.json");
 const PIDS_RECORD = join(FAKE_DIR, "fake-avatar-pids.json");
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ESRCH" || code === "EINVAL") return false;
+    throw err;
+  }
+}
+
+async function waitForProcessExit(
+  pid: number,
+  timeoutMs = 3_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  return !isProcessAlive(pid);
+}
+
 beforeAll(() => {
   mkdirSync(FAKE_DIR, { recursive: true });
 
@@ -426,17 +449,12 @@ describe("launcher with fake Windows Terminal (P8)", () => {
       // The fake avatar wrote its PID into the log.
       const recorded = JSON.parse(readFileSync(PIDS_RECORD, "utf8"));
       expect(recorded.length).toBeGreaterThan(0);
-      // The fake wt should have reaped the fake avatar child via its
-      // own exit listener. Either way, the avatAR PID is gone now.
+      // Child cleanup is asynchronous across the launcher, fake WT,
+      // and OS process table. Require cleanup within the contract
+      // deadline rather than in the same scheduler tick.
       const survivors: number[] = [];
       for (const entry of recorded) {
-        try {
-          process.kill(entry.pid, 0);
-          survivors.push(entry.pid);
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException).code;
-          if (code !== "ESRCH" && code !== "EINVAL") throw err;
-        }
+        if (!(await waitForProcessExit(entry.pid))) survivors.push(entry.pid);
       }
       expect(survivors).toEqual([]);
     },

@@ -1,0 +1,60 @@
+{
+  "id": "pi-emote-default",
+  "displayName": "Aza",
+  "license": "MIT",
+  "notice": "THIRD_PARTY_NOTICES.md",
+  "sourceDirectory": "emotes/default",
+  "activities": {
+    "greeting": {
+      "label": "saying hello",
+      "intervalMs": 440,
+      "frames": ["hi/hi1.png", "hi/hi2.png"]
+    },
+    "idle": {
+      "label": "resting",
+      "intervalMs": 1800,
+      "frames": ["idle/idle.png", "idle/idle_blink.png", "idle/idle.png"]
+    },
+    "thinking": {
+      "label": "thinking",
+      "intervalMs": 720,
+      "frames": ["think/think.png", "think/think_hard.png"]
+    },
+    "reading": {
+      "label": "reading",
+      "intervalMs": 520,
+      "frames": ["read/read1.png", "read/read2.png"]
+    },
+    "writing": {
+      "label": "writing",
+      "intervalMs": 500,
+      "frames": ["write/write1.png", "write/write2.png"]
+    },
+    "tooling": {
+      "label": "using a tool",
+      "intervalMs": 500,
+      "frames": ["tool/tool1.png", "tool/tool2.png"]
+    },
+    "talking": {
+      "label": "responding",
+      "intervalMs": 150,
+      "frames": [
+        "talk/talk_close.png",
+        "talk/talk_small.png",
+        "talk/talk_mid.png",
+        "talk/talk_wide.png",
+        "talk/talk_mid.png"
+      ]
+    },
+    "compacting": {
+      "label": "organizing memory",
+      "intervalMs": 900,
+      "frames": ["compact/compact1.png"]
+    },
+    "failure": {
+      "label": "hit a problem",
+      "intervalMs": 480,
+      "frames": ["failure/failure1.png", "failure/failure2.png"]
+    }
+  }
+}

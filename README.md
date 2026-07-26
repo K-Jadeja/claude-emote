@@ -1,452 +1,489 @@
 # claude-emote
 
-Animated pixel-art avatar for Claude Code. Ports the proven
-[pi-emote](https://github.com/JarodMica/jarods-pi-extensions)
-animation engine and replaces Pi lifecycle events with Claude Code
-hooks.
+A lightweight animated desktop companion for Claude Code.
 
-```
-┌─────────────────────────────────────────┬──────────┐
-│              Claude Code                │  Avatar  │
-│                                         │          │
-│  > tell me about this repo              │  (◕‿◕)   │
-│  ◂ reading files...                     │  read    │
-│  ◂ editing src/foo.ts                   │  write   │
-│  ◂ running tests...                     │  tool    │
-│  ◂ The test suite passes!               │  talk    │
-│                                         │          │
-└─────────────────────────────────────────┴──────────┘
-```
+`claude-emote` turns Claude Code lifecycle hooks into a small, expressive pet
+that shows when a session is thinking, reading, writing, using tools, waiting
+for permission, finished, or blocked. It does not read terminal text and does
+not make another model call.
 
-## Status (Phase 9B)
+The project currently has two renderers:
 
-What is **automatically validated** today:
+- a production-tested terminal renderer that runs beside Claude Code in
+  Windows Terminal;
+- a new transparent desktop overlay built with Neutralinojs and the operating
+  system WebView.
 
-- Phase 9A: clean-checkout validation,
-  `claude plugin validate . --strict`,
-  `npm run verify:upstream`,
-  `npm run validate:package`,
-  the bundled ASCII production path, and bundled image-asset
-  compatibility — all passed on the same source tree.
-- Phase 9B: `npm run benchmark:latency` measures the local
-  production path — real compiled hook bridge, real compiled
-  avatar process, real event mapper, real copied Animator,
-  real ASCII renderer, real StandaloneRenderHost — through
-  four distinct metrics:
-  A. hook-bridge delivery
-  B. direct avatar event-to-frame
-  C. full hook-bridge-to-avatar-frame
-  D. hook-bridge fail-open against an unavailable endpoint
-  Full numbers live in
-  [`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md)
-  with raw samples in
-  [`docs/benchmarks/phase9b-raw.json`](docs/benchmarks/phase9b-raw.json).
-  The numbers apply to one machine on one date; they are
-  not universal results.
+The desktop overlay is a working developer preview. The next release milestone
+is to make the existing `claude-emote` command start and connect it
+automatically.
 
-**Phase 9B latency summary** (measured on one machine on 2026-07-18,
-source commit `7c2cc94`):
+## Why this architecture
 
-| Metric | p50 | p95 | max |
-| ------ | --- | --- | --- |
-| full hook → ASCII stdout frame | 77.88 ms | 93.53 ms | 123.76 ms |
-| direct event → ASCII stdout frame | 15.59 ms | 16.29 ms | 20.07 ms |
-| bridge spawn → server receive | 48.71 ms | 60.86 ms | 88.40 ms |
-| unavailable-avatar fail-open exit | 52.68 ms | 70.79 ms | 80.66 ms |
+[Claude Code lifecycle hooks](https://code.claude.com/docs/en/hooks-guide)
+cover session start, prompts, tool use, permissions, compaction, completion,
+and session end. Those events are a better source of truth than terminal
+scraping: they are structured, session-aware, and do not require guessing what
+Claude is doing.
 
-Measurements stop at avatar stdout. Real Claude hook-emission
-timing and real Windows Terminal compositor/display timing are not
-measured; Sixel rendering is not measured. Full results are in
-[`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md) with raw
-samples in
-[`docs/benchmarks/phase9b-raw.json`](docs/benchmarks/phase9b-raw.json).
-These numbers apply to one machine on one date and are not
-universal results.
+The pet receives only five semantic fields:
 
-What is **not yet validated** and remains pending:
-
-- Real interactive Windows Terminal visual validation (a human
-  on Windows 10/11, inside an actual Windows Terminal pane, must
-  confirm the avatar appears, animates, and reacts).
-- Real Claude hook emission latency. The benchmark stops at the
-  boundary where Claude Code would hand the event to the bridge;
-  the time Claude itself takes before firing a hook is outside
-  this measurement.
-- Real Windows Terminal drawing latency (cursor-home erase +
-  redraw under the actual WT scheduler) is outside this
-  measurement.
-- npm publish flow. The package tarball is validated but no
-  registry is contacted.
-
-The total automated test count is reported by `npm test` itself;
-this README does not hardcode a number that can drift.
-
-## Status (Phase 10)
-
-Phase 10 is the Windows Terminal discovery and renderer-startup
-closeout. It does not change the runtime architecture beyond
-making the launcher resolve the modern Windows Terminal AppX
-execution alias and giving the avatar process a graceful
-bundled-ASCII startup retry. Full numbers from the prior
-benchmark still live in
-[`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md).
-
-## Status (Phase 10.1)
-
-Phase 10.1 is a narrow repair for the corrupted-output pattern
-observed in the real Windows Terminal pane: the narrow right pane
-was displaying the fallback warning, the `CLAUDE_EMOTE_READY`
-marker, and long installed-package paths before the renderer
-could take ownership. Because those lines are wrap-prone in a
-25%-width pane and the renderer only repaints over its own frame
-row count, the cursor-relative redraw eventually overlapped the
-wrapped startup text, producing merged output like
-`(• ◡ •)enderer could not pr...`.
-
-Phase 10.1 introduces an explicit **visual-pane output mode** that
-the launcher activates only for the WT pane child:
-
-- The launcher passes `CLAUDE_EMOTE_VISUAL_PANE=1` to the WT pane
-  child only. It is not added to Claude's environment; it is not
-  set for the attached or test branches; the split-pane argv is
-  unchanged.
-- In visual-pane mode the avatar's output policy suppresses every
-  non-frame operational line — READY, fallback warning, debug
-  diagnostics, avatar-server event logs, port / instance /
-  emote-directory messages — from stdout / stderr. The pane is
-  treated as an exclusive render area.
-- Before the first frame, the renderer emits exactly one
-  `\x1b[2J\x1b[H` clear-pane + cursor-home sequence. Subsequent
-  redraws use the normal erase-N-lines path; the renderer owns the
-  frame area from then on.
-- Readiness is observed exclusively through `/health`, which the
-  launcher already polls. The READY marker is not consumed by the
-  launcher in any mode; this was always an external convenience.
-- When `CLAUDE_EMOTE_LOG_FILE` is configured, suppressed
-  diagnostics still land in the log file so operators can debug a
-  real Windows Terminal run without paying the visual-corruption
-  cost.
-- Attached / test / validation modes retain their full diagnostic
-  output — READY on stdout, the fallback warning on stderr,
-  installed paths on the READY line. The new contract is opt-in.
-- Fatal startup errors in visual-pane mode may still print one
-  concise line because no usable renderer exists in that case.
-
-Phase 10.1 does not change the Phase 9B benchmark values. The
-benchmark targets the avatar stdout frame boundary and the
-attached-mode output paths; visual-pane mode suppresses bytes
-the benchmark never measures. Full results still live in
-[`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md).
-
-### What still requires real-machine validation
-
-- Real interactive Windows Terminal visual validation must be
-  rerun after this fix. The automated tests prove the output
-  policy, the launcher environment wiring, the surface
-  initialization, and the installed-package smoke; a human on
-  Windows 10/11 inside an actual Windows Terminal pane must
-  confirm the avatar now appears cleanly, without the merged
-  `(• ◡ •)enderer could not pr...` corruption pattern.
-
-### Windows Terminal discovery
-
-Windows Terminal discovery now supports the AppX execution
-alias at:
-
-```
-%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe
+```ts
+{
+  sessionId: string;
+  sequence: number;
+  status: "running" | "needs-input" | "ready" | "blocked" | "ended" | "disconnected";
+  activity: "greeting" | "idle" | "thinking" | "reading" | "writing" | "tooling" | "talking" | "compacting" | "failure";
+  timestamp: number;
+}
 ```
 
-Resolution order is, top to bottom:
+Prompts, assistant output, tool arguments, tool results, project paths, and
+credentials are excluded from the desktop protocol.
 
-1. `CLAUDE_EMOTE_WT_EXE` (explicit override)
-2. The canonical WindowsApps alias
-   (`%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe`)
-3. `where.exe wt.exe` output
-4. `PATH` scan
+Neutralinojs keeps the native distribution small by using the system WebView
+instead of bundling Chromium. The current Windows executable plus resources is
+about 4 MB before installer packaging or signing. Electron is not required.
 
-The resolver uses no `shell: true`, no `cmd /c`, no `start`, no
-PowerShell helper, and no detached process. Spawning is a direct
-`child_process.spawn` of the resolved executable. The shell-free
-spawn path is the contract; do not "helpfully" wrap it in a
-shell later.
+## What works now
 
-### Renderer startup
+| Capability | Status |
+| --- | --- |
+| Claude Code hook plugin | Working |
+| Terminal avatar beside Claude | Working |
+| Transparent always-on-top desktop pet | Working developer preview |
+| Desktop demo with every pose | Working |
+| Live semantic state snapshot and SSE stream | Working |
+| Permission-needed and session-ended states | Working |
+| Window dragging and position persistence | Working |
+| Windows display scaling | Tested |
+| Packaged Windows executable | Builds and launches |
+| One-command automatic desktop launch | Next milestone |
+| Installer, tray, signing, auto-update | Not implemented |
+| Multi-session pet manager | Not implemented |
 
-- **Chafa is optional for basic operation.** When Chafa is
-  missing, not executable, or not Sixel-capable, the avatar falls
-  back to the bundled ASCII renderer and continues to run; no
-  startup failure.
-- **Automatic bundled-image startup retries once.** When the
-  preferred renderer cannot produce its initial frame, the
-  startup sequence retries exactly once with the bundled
-  `AsciiRenderer` and the `emotes/ascii` emote set. This retry is
-  internal to the startup path and only fires for the auto-chosen
-  configuration.
-- **Explicit custom emote directories never silently fall back to
-  bundled artwork.** When the user has explicitly pointed the
-  launcher at a custom emote directory (via `CLAUDE_EMOTE_EMOTE_DIR`
-  or an explicit `config.json` setting), startup failures surface
-  to the user; bundled ASCII is reserved for the implicit, no-user-
-  choice case.
-- **The fallback stays in the same avatar process and keeps the
-  same port, instance ID, parent PID, and HTTP server lifecycle.**
-  A fallback does not spawn a second avatar, does not rebind the
-  port, does not regenerate the instance ID, and does not close or
-  reopen the HTTP server. The HTTP listener and parent-PID watcher
-  remain continuous across the retry.
+## Prerequisites
 
-### What is still pending
+For the current Windows development flow:
 
-- **Real interactive Windows Terminal visual validation.** A human
-  on Windows 10/11, inside an actual Windows Terminal pane, must
-  confirm the avatar appears, animates, and reacts. This step has
-  not yet been rerun against the Phase 10 build and remains pending.
+- Windows 10 or 11;
+- Node.js 20.18.1 or newer, or Node.js 22;
+- npm 10 or newer;
+- Claude Code installed and available as `claude`;
+- Windows Terminal for the terminal side-pane renderer;
+- WebView2 for the desktop overlay. It is included with current Windows
+  installations;
+- optionally, Chafa for image rendering in the terminal. The desktop overlay
+  does not need Chafa.
 
-## What it is
+No Electron, Rust, Go, .NET SDK, cloud service, or additional AI API key is
+required.
 
-`claude-emote` runs an animated pixel-art avatar in a narrow
-Windows Terminal pane next to Claude Code. The avatar reacts to
-Claude Code's lifecycle events (prompt submitted, tool running,
-streaming response, etc.) with no AI or model call in the loop —
-state decisions are made by a tiny mapper in
-[`src/claude/event-mapper.ts`](src/claude/event-mapper.ts).
-
-## What it isn't
-
-- Not a custom Claude Code TUI
-- Not a chat application or LLM wrapper
-- Not a generic "AI companion"
-- Not Linux/macOS compatible (V1 is Windows Terminal only; ASCII
-  fallback works on any TTY but the pane splitting is WT-specific)
-
-## Quick start
-
-### Prerequisites
-
-- Windows 10 or 11
-- [Node.js](https://nodejs.org/) 20.18.1+ (or 22.x)
-- [Claude Code](https://docs.claude.com/claude-code) installed and on `PATH`
-- [Windows Terminal](https://aka.ms/terminal) installed
-- Optional: [Chafa](https://hpjansson.org/chafa/) for Sixel rendering
-
-### Install
+## Install from this repository
 
 ```powershell
-# from this repo (development)
-git clone <this-repo> claude-emote
+git clone <repository-url> claude-emote
 cd claude-emote
 npm ci
+npm run build
 ```
 
-The `pretest` script automatically builds the dist artifacts on
-`npm test`. For a manual build (e.g. before running the launcher
-directly), use `npm run build`.
-
-For a packaged install (locally produced tarball, no registry
-involved), use `npm run validate:package` — the script
-demonstrates the full flow end-to-end.
-
-### Run
+To make the development checkout's command available globally:
 
 ```powershell
-# Start Claude Code with the avatar pane
-claude-emote
+npm link
+claude-emote --version
+```
 
-# Forward arbitrary Claude flags
+If you do not want to create a global link, run the launcher directly:
+
+```powershell
+node .\bin\claude-emote.cjs --version
+```
+
+This repository is currently private in `package.json` and has not been
+published to npm. Do not expect `npm install -g claude-emote` from the public
+registry to work yet.
+
+## Use the terminal avatar
+
+Run `claude-emote` wherever you would normally run `claude`:
+
+```powershell
+claude-emote
 claude-emote --resume
 claude-emote --model opus
 claude-emote --dangerously-skip-permissions
-
-# Run the standalone demo (no Claude required)
-npm run demo
-
-# Force a specific renderer
-$env:CLAUDE_EMOTE_DEMO_PROTOCOL="ascii"  # or "sixel"
-npm run demo
 ```
 
-### Verify
+All arguments are forwarded to the real Claude Code process. The launcher:
+
+1. verifies that Claude Code is available;
+2. allocates a random loopback port and session ID;
+3. starts the local avatar host;
+4. opens the terminal renderer in a narrow Windows Terminal pane;
+5. waits for the avatar host health check;
+6. starts Claude with this repository's plugin and session endpoint;
+7. forwards Claude's exit code and cleans up the session process.
+
+If the visual process cannot start after its bounded startup checks, Claude
+still starts and the launcher prints a clear warning. A cosmetic companion
+must not prevent the user's coding session.
+
+## Run the desktop pet demo
+
+The simplest way to see the new native overlay is:
 
 ```powershell
-# Run the full test suite (pretest builds dist automatically).
-npm test
-
-# Confirm the vendored pi-emote snapshot is unmodified.
-npm run verify:upstream
-
-# Validate the Claude plugin manifest strictly.
-npm run validate:plugin
-
-# Pack, install in an unrelated temp dir, run smoke tests.
-npm run validate:package
+npm run overlay:run
 ```
 
-The following scripts remain in the repository for developer
-ergonomics but are NOT part of the package's automated validation
-in Phase 9B:
+The first run downloads the pinned Neutralino native runtime, builds the local
+web resources, and opens the transparent desktop window. It cycles through
+every pose using synthetic semantic state and is visibly labelled as a demo.
+It does not start Claude.
 
-- `npm run demo` — interactive state demo.
+In the overlay:
 
-## How it works
+- drag the body to reposition it;
+- hover to reveal controls;
+- use pause or next to inspect an animation;
+- close it with its close control or stop the command with `Ctrl+C`;
+- reopen it to verify that its last desktop position was retained.
 
-Claude Code fires a hook for every supported lifecycle event. The
-hook command (defined in [`hooks/hooks.json`](hooks/hooks.json))
-spawns the bridge executable at
-`dist/claude/hook-bridge.js`. The bridge:
+Build a distributable package with:
 
-1. Reads the complete hook JSON from stdin.
-2. Reads `CLAUDE_EMOTE_ENDPOINT` from the environment.
-3. POSTs the unmodified JSON to the local avatar server.
-4. Exits 0 — never blocks Claude.
+```powershell
+npm run overlay:package
+```
 
-The avatar server (`dist/host/avatar-process.js`) listens on
-`127.0.0.1:<random-port>`, applies the event mapper, and drives the
-copied pi-emote Animator. The Animator updates the selected Renderer
-(ASCII or Sixel), and the StandaloneRenderHost writes the new frame
-at the pane's home position with ghost-prevention erasure.
+Generated packages are written under `desktop/dist/` and are intentionally not
+tracked by Git.
 
-Full architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-State mapping rules: [`docs/STATE_MACHINE.md`](docs/STATE_MACHINE.md).
-Hook protocol contract: [`docs/HOOK_PROTOCOL.md`](docs/HOOK_PROTOCOL.md).
-Source map (every file's provenance): [`docs/SOURCE_MAP.md`](docs/SOURCE_MAP.md).
+## Run a live desktop development session
+
+Automatic launcher-to-overlay orchestration is the next milestone. Until that
+lands, a live overlay can be connected manually:
+
+1. Build the Node host and desktop resources:
+
+   ```powershell
+   npm run build
+   npm run overlay:build
+   npm run overlay:setup
+   ```
+
+2. In PowerShell window 1, start the session host. Keep this window open:
+
+   ```powershell
+   node .\dist\host\avatar-process.js `
+     --port=43123 `
+     --instance=desktop-dev `
+     "--parentPid=$PID"
+   ```
+
+   Replace `43123` if that port is already occupied. The process prints
+   readiness information outside visual-pane mode.
+
+3. In PowerShell window 2, launch Neutralino with the event endpoint encoded
+   in its URL:
+
+   ```powershell
+   desktop\bin\neutralino-win_x64.exe `
+     --load-dir-res `
+     --path=desktop `
+     "--url=/?endpoint=http%3A%2F%2F127.0.0.1%3A43123%2Fevent"
+   ```
+
+4. In PowerShell window 3, point the bundled hook bridge at the same session
+   host and start Claude with this repository as a plugin:
+
+   ```powershell
+   $env:CLAUDE_EMOTE_ENDPOINT = "http://127.0.0.1:43123/event"
+   claude --plugin-dir (Resolve-Path .)
+   ```
+
+5. Submit prompts and approve a tool request to observe live state changes.
+   Exit Claude, then stop the two development processes with `Ctrl+C`.
+
+The exact protocol and a more detailed development recipe are in
+[`docs/DESKTOP_SESSION_PROTOCOL.md`](docs/DESKTOP_SESSION_PROTOCOL.md).
+This manual procedure is for contributors, not the intended end-user flow.
+
+## Intended one-command user flow
+
+The next implementation changes `claude-emote` from:
+
+```text
+Claude + terminal pet
+```
+
+to:
+
+```text
+claude-emote [normal Claude arguments]
+    |
+    +-- starts one local session host
+    +-- starts one desktop pet connected to that host
+    +-- starts Claude Code with the bundled hook plugin
+    +-- supervises shutdown and forwards Claude's exit code
+```
+
+For the user, the workflow remains:
+
+```powershell
+claude-emote --resume
+```
+
+The expected experience is:
+
+1. The pet wakes while Claude starts.
+2. The pet changes pose from real Claude lifecycle events.
+3. A strong attention state appears when permission or input is required.
+4. Closing Claude ends the session and lets the pet rest briefly before
+   closing, unless the user has pinned it.
+5. Starting another `claude-emote` session creates another identified pet.
+6. A later tray or "nest" UI can group multiple sessions without changing the
+   hook or semantic-state contracts.
+
+See [`docs/USER_FLOW.md`](docs/USER_FLOW.md) for the product flow, failure
+behavior, and the reasons this is preferable to terminal scraping, MCP calls,
+or wrapping the Claude Agent SDK.
+
+## How events become animation
+
+```text
+Claude Code
+    |
+    | plugin command hook, JSON on stdin
+    v
+hook bridge
+    |
+    | POST /event on 127.0.0.1
+    v
+per-session Node host
+    |
+    +-- validates the hook payload
+    +-- maps it to a semantic activity
+    +-- updates the terminal animation engine
+    +-- publishes a privacy-minimal snapshot and SSE event
+    |
+    v
+desktop overlay
+    |
+    +-- validates the five-field state
+    +-- ignores stale sequence numbers
+    +-- selects local animation frames
+    +-- reconnects through an authoritative snapshot
+```
+
+The command hook exits successfully and never controls Claude's permissions or
+model behavior. The pet observes session lifecycle; it does not modify it.
+
+Detailed references:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) - existing host and terminal
+  architecture;
+- [`docs/DESKTOP_OVERLAY_ARCHITECTURE.md`](docs/DESKTOP_OVERLAY_ARCHITECTURE.md)
+  - desktop shell decision and boundaries;
+- [`docs/DESKTOP_SESSION_PROTOCOL.md`](docs/DESKTOP_SESSION_PROTOCOL.md) -
+  desktop wire protocol and privacy contract;
+- [`docs/STATE_MACHINE.md`](docs/STATE_MACHINE.md) - hook-to-animation rules;
+- [`docs/SOURCE_MAP.md`](docs/SOURCE_MAP.md) - source ownership and provenance;
+- [`docs/PRODUCT_VISION.md`](docs/PRODUCT_VISION.md) - product principles.
+
+## State mapping
+
+Examples of the deterministic mapping:
+
+| Claude event | Pet status | Pet activity |
+| --- | --- | --- |
+| `SessionStart` | running | greeting |
+| `UserPromptSubmit` | running | thinking |
+| `PreToolUse` for Read/Glob/Grep | running | reading |
+| `PreToolUse` for Edit/Write | running | writing |
+| other `PreToolUse` | running | tooling |
+| `PermissionRequest` | needs-input | thinking |
+| `PreCompact` | running | compacting |
+| `Stop` | ready | idle |
+| failed tool or stop | blocked | failure |
+| `SessionEnd` | ended | idle |
+
+No hidden reasoning tokens are inspected. "Thinking" is a presentation state
+derived from public lifecycle events, not chain-of-thought access.
 
 ## Configuration
 
-`config.json` is the same as the upstream pi-emote config. The
-launcher also honours these environment variables:
+`config.json` retains compatibility with the upstream pi-emote animation
+configuration. The launcher also recognizes:
 
 | Variable | Purpose |
-| -------- | ------- |
-| `CLAUDE_EMOTE_INSTANCE_ID` | Random per-launch ID, set by launcher. |
-| `CLAUDE_EMOTE_ENDPOINT` | Avatar server URL, set by launcher. |
-| `CLAUDE_EMOTE_PARENT_PID` | PID of the launcher, watched for orphan detection. |
-| `CLAUDE_EMOTE_DEBUG=1` | Verbose stderr logging. |
-| `CLAUDE_EMOTE_CHAFA_PATH` | Path to `chafa.exe` for Sixel rendering. |
-| `CLAUDE_EMOTE_EMOTE_DIR` | Override the emote-set directory. |
-| `CLAUDE_EMOTE_DATA_DIR` | Override the per-user data dir (default `~/.claude-emote`). |
-| `CLAUDE_EMOTE_LOG_FILE` | Optional persistent log path; suppressed visual-pane diagnostics still land here. |
-| `CLAUDE_EMOTE_VISUAL_PANE` | Set to `1` only for the WT pane child; suppresses non-frame output and switches readiness to `/health`. |
-| `PI_EMOTE_CHAFA_PATH` | Backwards-compatible Chafa path (V1 also reads this). |
-| `WT_SESSION` | Set by Windows Terminal; the launcher reads it to confirm pane mode. |
+| --- | --- |
+| `CLAUDE_EMOTE_INSTANCE_ID` | Per-launch ID set by the launcher |
+| `CLAUDE_EMOTE_ENDPOINT` | Per-session loopback event URL set by the launcher |
+| `CLAUDE_EMOTE_PARENT_PID` | Launcher PID used for orphan cleanup |
+| `CLAUDE_EMOTE_DEBUG=1` | Verbose diagnostic logging |
+| `CLAUDE_EMOTE_CHAFA_PATH` | Explicit `chafa.exe` path |
+| `CLAUDE_EMOTE_EMOTE_DIR` | Explicit custom terminal emote directory |
+| `CLAUDE_EMOTE_DATA_DIR` | User data directory; defaults to `~/.claude-emote` |
+| `CLAUDE_EMOTE_LOG_FILE` | Optional persistent diagnostic log |
+| `CLAUDE_EMOTE_VISUAL_PANE=1` | Internal terminal-pane output mode |
+| `CLAUDE_EMOTE_WT_EXE` | Explicit Windows Terminal executable override |
 
-## Custom emote import
+Variables described as launcher-owned are internal protocol. End users should
+not need to set them in the finished desktop flow.
 
-The upstream pi-emote importer (`src/core/importer.ts`) loads emote
-sets from:
+## Custom artwork
 
-1. `<project>/.claude-emote/extensions/claude-emote/emotes/<set>/`
-2. `<user-data>/extensions/claude-emote/emotes/<set>/`
-3. `<extension>/emotes/<set>/` (built-in defaults)
+The current terminal importer can read PNG and YAML emote sets inherited from
+pi-emote. The desktop preview uses 19 existing MIT-attributed PNG frames from
+`emotes/default/`.
 
-To use a custom set, drop a folder under one of those locations and
-set `"emotes": [{ "model": "*", "emote-set": "<your-set>" }]` in
-`config.json`. The folder layout must match the upstream format
-(see `vendor/pi-emote-original/emotes/ascii/ascii.yaml` for the ASCII
-schema, or `vendor/pi-emote-original/emotes/default/` for the image
-schema).
+The desktop asset manifest is `desktop/asset-manifest.json`. A future public
+pet-pack contract should include:
 
-No conversion is required — the importer reads both PNG and YAML
-formats directly from the upstream.
+- a stable pet ID and display name;
+- license and attribution;
+- frame dimensions and animation timing;
+- mappings for every required activity;
+- validation that rejects missing or ambiguous states.
 
-## Plugin development
+Do not silently substitute a different pose when a required frame is missing.
+The build fails instead.
 
-To iterate on the plugin manifest or hooks without rebuilding:
+## Development
 
-```powershell
-# Symlink the plugin into your Claude Code plugins directory
-$env:CLAUDE_PLUGINS="$env:USERPROFILE\.claude\plugins"
-New-Item -ItemType Junction -Path "$env:CLAUDE_PLUGINS\claude-emote" `
-  -Target (Resolve-Path .)
-```
+Common commands:
 
-For local development without symlinks, point Claude Code at the
-absolute path of the compiled bridge in
-[`hooks/hooks.json`](hooks/hooks.json).
+| Command | Purpose |
+| --- | --- |
+| `npm run build` | Compile the Node launcher, host, and terminal renderer |
+| `npm run typecheck` | Type-check Node source |
+| `npm run overlay:typecheck` | Type-check desktop source |
+| `npm run test:unit` | Run small-scope tests |
+| `npm run test:integration` | Run process and HTTP boundary tests |
+| `npm test` | Build and run the complete suite |
+| `npm run demo` | Run every terminal animation state |
+| `npm run overlay:run` | Build and launch the native desktop demo |
+| `npm run overlay:package` | Build native packages |
+| `npm run verify:upstream` | Confirm the vendored upstream snapshot is unchanged |
+| `npm run validate:plugin` | Validate the Claude Code plugin manifest |
+| `npm run validate:package` | Pack and smoke-test the npm package |
+| `npm run audit:runtime` | Audit production dependencies only |
+
+See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the contributor workflow
+and recurring troubleshooting procedures.
+
+The latency benchmark and its limits are recorded in
+[`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md). On the recorded test
+machine, the full command-hook bridge to terminal-frame path had a 77.88 ms p50
+and 93.53 ms p95. Those figures stop at avatar stdout and are not universal
+Claude or display-latency claims.
 
 ## Troubleshooting
 
-### "claude not found on PATH"
+### `claude-emote` is not recognized
 
-Install [Claude Code](https://docs.claude.com/claude-code) and make
-sure `claude` is on `PATH`. From a normal `cmd.exe` window:
-`where claude` should resolve.
-
-### Avatar pane doesn't appear
-
-Check that you're running inside Windows Terminal (the launcher
-checks `WT_SESSION`). If you ran `claude-emote` from `cmd.exe`
-inside a legacy console, the avatar falls back to a separate
-console window — that's expected.
-
-### Avatar is monochrome / text-only
-
-The avatar is using ASCII because Sixel rendering isn't available.
-Verify:
+Run `npm link` from the repository, or invoke:
 
 ```powershell
-where.exe chafa          # should resolve to chafa.exe
-$env:CLAUDE_EMOTE_CHAFA_PATH = "C:\path\to\chafa.exe"  # if not on PATH
+node .\bin\claude-emote.cjs
 ```
 
-Windows Terminal must also allow Sixel graphics. Recent versions
-expose this in Settings → Profile → Advanced → "Enable Sixel".
+### Claude Code is not found
 
-### Avatar process is still running after Claude exits
-
-This is by design during the orphan-detection grace period. The
-parent-PID watcher closes the HTTP server and shuts the avatar
-down once the launcher exits. If a process persists longer, send
-`taskkill /F /PID <pid>`.
-
-### Tests fail with "verify-upstream: 1 mismatch(es)"
-
-The vendored snapshot was modified. Re-record with:
+Confirm the real command resolves:
 
 ```powershell
-node scripts\verify-upstream.mjs --record
+Get-Command claude
 ```
 
-…and review the diff carefully before committing. The snapshot must
-only be re-recorded after intentionally pulling a new upstream
-commit.
+Install or repair Claude Code before retrying.
 
-## Limitations
+### The terminal avatar pane does not appear
 
-- V1 only works on Windows 10/11 inside Windows Terminal. Linux and
-  macOS get the ASCII renderer as a fallback, but no pane splitting.
-- The avatar pane is separate from Claude Code's TUI because Claude
-  Code does not expose an arbitrary embedded widget slot. This is
-  not a workaround — it is the architectural choice the spec made.
-- The benchmark measures the local production path end to end at
-  the stdout frame boundary. Real Claude hook emission latency and
-  real Windows Terminal redraw scheduling are not part of the
-  measurement; numbers apply to one machine on one date.
-- Sixel rendering requires Chafa and a Sixel-capable terminal.
-- We do not detect hidden reasoning tokens. `think` is inferred
-  from lifecycle events only.
+Run `claude-emote` inside Windows Terminal. The launcher uses the
+`WT_SESSION` environment value to avoid opening a pane in an unrelated terminal
+window.
 
-## Uninstall
+Enable diagnostics when needed:
 
 ```powershell
-# Remove the global command (only relevant if you installed via npm)
-npm uninstall -g claude-emote
+$env:CLAUDE_EMOTE_DEBUG = "1"
+claude-emote
+```
 
-# Remove local dev checkout
-Remove-Item -Recurse -Force .\claude-emote
+### The terminal avatar is text-only
 
-# Remove user config
+The bundled ASCII renderer is the supported automatic fallback when the user
+has not explicitly selected custom artwork. Install Chafa or point
+`CLAUDE_EMOTE_CHAFA_PATH` at a Sixel-capable `chafa.exe` for terminal images.
+The desktop overlay always uses its bundled local PNG frames.
+
+### The desktop overlay does not start
+
+Fetch the pinned native runtime and retry:
+
+```powershell
+npm run overlay:setup
+npm run overlay:run
+```
+
+If it opens as an opaque rectangle, update WebView2 and confirm that
+`modes.window.transparent` remains enabled in
+`desktop/neutralino.config.json`.
+
+### The desktop overlay says disconnected
+
+In live mode, confirm the per-session avatar host is still running and that the
+URL is a loopback HTTP endpoint ending in `/event`, `/state`, or `/stream`.
+Remote hosts and unexpected paths are rejected intentionally.
+
+### A process remains after Claude exits
+
+The launcher and avatar host use parent-PID watching and bounded shutdown.
+Enable `CLAUDE_EMOTE_DEBUG=1`, reproduce once, and record the process tree and
+log before forcing termination. Recurring cleanup failures require an incident
+note and an exact regression test.
+
+## Security
+
+- The host binds to `127.0.0.1`, not a network interface.
+- The browser-readable protocol allows only loopback origins.
+- The desktop schema rejects unknown fields.
+- Raw Claude content is not retained or sent to the overlay.
+- Production dependencies currently audit with zero known vulnerabilities.
+- Build-only Neutralino CLI advisories and the pinned-version rationale are
+  documented in [`docs/SECURITY.md`](docs/SECURITY.md).
+- A per-session capability token is required before turning the session hosts
+  into a generalized background daemon.
+
+## Platform scope
+
+The terminal side-pane launcher is currently Windows Terminal-specific. The
+desktop shell is also presently packaged and visually validated on Windows.
+The UI and semantic protocol are platform-neutral, but macOS and Linux native
+packaging are not yet claimed as supported releases.
+
+## Uninstall a development checkout
+
+```powershell
+npm unlink -g claude-emote
+```
+
+Then remove the checkout and, if desired, the user data directory:
+
+```powershell
 Remove-Item -Recurse -Force $env:USERPROFILE\.claude-emote
-
-# Remove the Claude Code plugin link (if you created one)
-Remove-Item -Recurse -Force "$env:USERPROFILE\.claude\plugins\claude-emote"
-
-# Remove from your project (if you configured per-project hooks)
-# Edit .claude/settings.json or your project's hooks config.
 ```
 
-## Licence
+If you manually installed a Claude Code plugin link, remove only that specific
+link from your Claude plugins directory.
 
-MIT. See [`LICENSE`](LICENSE). The vendored pi-emote snapshot
-retains its original MIT licence; see
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for attribution.
+## License
+
+MIT. See [`LICENSE`](LICENSE).
+
+The animation engine and current default artwork retain their upstream
+MIT attribution in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The
+vendored source snapshot under `vendor/pi-emote-original/` is immutable.

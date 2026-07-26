@@ -29,9 +29,14 @@ const PROJECT_ROOT = resolve(__filename, "..", "..");
 const EXT_DIR = PROJECT_ROOT;
 const EMOTE_SET_NAME = process.env.CLAUDE_EMOTE_DEMO_EMOTE_SET ?? "ascii";
 const EMOTE_SET_DIR = resolve(EXT_DIR, "emotes", EMOTE_SET_NAME);
+const durationScale = Number(process.env.CLAUDE_EMOTE_DEMO_DURATION_SCALE ?? "1");
 
 if (!existsSync(EMOTE_SET_DIR)) {
   console.error(`demo: emote set not found at ${EMOTE_SET_DIR}`);
+  process.exit(1);
+}
+if (!Number.isFinite(durationScale) || durationScale <= 0) {
+  console.error("demo: CLAUDE_EMOTE_DEMO_DURATION_SCALE must be a positive number");
   process.exit(1);
 }
 
@@ -69,18 +74,12 @@ renderer.setTui(host);
 
 const animator = new Animator(config, renderer);
 
-// Wire frame -> host so each show* call repaints.
-const origSetFrame = (frame) => host.setCurrentFrame(frame);
-renderer.getRenderedFrame = () => host.peekFrame();
-// Re-implement getRenderedFrame to always reflect the host's cached frame.
-renderer.getRenderedFrame = () => host.peekFrame();
-// Track show* calls by hooking requestRender — host updates cache itself.
-
 let timer = null;
 let currentTalkHandle = null;
 
 function transition(state, durationMs, withTalkTokens = false) {
-  console.error(`[demo] -> ${state} (${durationMs}ms)`);
+  const scaledDurationMs = Math.max(1, Math.round(durationMs * durationScale));
+  console.error(`[demo] -> ${state} (${scaledDurationMs}ms)`);
   animator.transitionTo(state);
   // For talk, feed a token every 250ms so the mouth alternates.
   if (state === "talk" && withTalkTokens) {
@@ -98,12 +97,12 @@ function transition(state, durationMs, withTalkTokens = false) {
     currentTalkHandle = setInterval(() => {
       animator.onTalkToken(tokens[i % tokens.length]);
       i++;
-    }, 250);
+    }, Math.max(1, Math.round(250 * durationScale)));
   } else if (currentTalkHandle) {
     clearInterval(currentTalkHandle);
     currentTalkHandle = null;
   }
-  timer = setTimeout(next, durationMs);
+  timer = setTimeout(next, scaledDurationMs);
 }
 
 const SEQUENCE = [

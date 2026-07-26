@@ -27,18 +27,30 @@ interface HoldNext { state: EmoteState; t: number }
 interface FakeAnimator {
   transitionTo(state: EmoteState): void;
   onTalkToken(token: string): void;
+  getCurrentState(): EmoteState;
   setHoldNextState(state: EmoteState): void;
   /** Force-fire any pending hold timer (for tests that don't use fake timers). */
   fireHold(): void;
   records: { transitions: Transition[]; tokens: TokenCall[]; holdNext: HoldNext[] };
-  private: { holdNextState: EmoteState; holdTimer: ReturnType<typeof setTimeout> | null; now: number };
+  private: {
+    currentState: EmoteState;
+    holdNextState: EmoteState;
+    holdTimer: ReturnType<typeof setTimeout> | null;
+    now: number;
+  };
 }
 
 function makeFakeAnimator(): FakeAnimator {
   const fake: FakeAnimator = {
     records: { transitions: [], tokens: [], holdNext: [] },
-    private: { holdNextState: "idle", holdTimer: null, now: 0 },
+    private: {
+      currentState: "idle",
+      holdNextState: "idle",
+      holdTimer: null,
+      now: 0,
+    },
     transitionTo(state) {
+      fake.private.currentState = state;
       fake.records.transitions.push({ state, t: fake.private.now });
       fake.private.now++;
       // Animator behavior: clearStateTimers clears holdTimer before
@@ -57,6 +69,9 @@ function makeFakeAnimator(): FakeAnimator {
     onTalkToken(token) {
       fake.records.tokens.push({ token, t: fake.private.now });
       fake.private.now++;
+    },
+    getCurrentState() {
+      return fake.private.currentState;
     },
     setHoldNextState(state) {
       fake.records.holdNext.push({ state, t: fake.private.now });
@@ -97,6 +112,7 @@ describe("avatar state controller (P7)", () => {
       animator: {
         transitionTo: (s) => fake.transitionTo(s),
         onTalkToken: (t) => fake.onTalkToken(t),
+        getCurrentState: () => fake.getCurrentState(),
         setHoldNextState: (s) => fake.setHoldNextState(s),
       },
       onShutdown: () => { shutdownCalls++; },
@@ -166,6 +182,21 @@ describe("avatar state controller (P7)", () => {
     // Advance fake timers past the hold duration.
     vi.advanceTimersByTime(150);
     expect(fake.records.transitions.map((r) => r.state)).toEqual(["failure", "think"]);
+  });
+
+  it("accepts ordinary activity after the Animator's failure hold ends", () => {
+    controller.handle(reaction("failure"));
+    vi.advanceTimersByTime(150);
+
+    expect(controller.getVisibleState()).toBe("think");
+    controller.handle(reaction("read"));
+
+    expect(fake.records.transitions.map((r) => r.state)).toEqual([
+      "failure",
+      "think",
+      "read",
+    ]);
+    expect(controller.getVisibleState()).toBe("read");
   });
 
   it("compact immediately replaces ordinary state", () => {

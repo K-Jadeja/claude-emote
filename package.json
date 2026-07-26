@@ -19,19 +19,28 @@
     "test:focused": "vitest run --no-file-parallelism --pool=forks",
     "benchmark:latency": "node scripts/benchmark-latency.mjs",
     "demo": "node scripts/demo-states.mjs",
+    "overlay:build": "node scripts/build-desktop-overlay.mjs",
+    "overlay:typecheck": "tsc -p desktop/tsconfig.json",
+    "overlay:setup": "node scripts/prepare-neutralino-runtime.mjs",
+    "overlay:run": "npm run overlay:build && npm run overlay:setup && cd desktop && neu run",
+    "overlay:package": "npm run overlay:build && npm run overlay:setup && cd desktop && neu build",
+    "audit:runtime": "npm audit --omit=dev",
     "verify:upstream": "node scripts/verify-upstream.mjs",
     "validate:plugin": "claude plugin validate . --strict",
     "validate:package": "node scripts/validate-package.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-tui": "0.74.2",
+    "@neutralinojs/lib": "6.9.0",
     "@types/adm-zip": "^0.5.8",
     "adm-zip": "^0.6.0"
   },
   "devDependencies": {
+    "@neutralinojs/neu": "11.7.1",
     "@types/node": "^20.14.10",
+    "esbuild": "0.28.1",
     "typescript": "^5.5.4",
-    "vitest": "^2.0.5",
+    "vitest": "4.1.10",
     "yaml": "2.9.0"
   },
   "files": [

@@ -74,6 +74,7 @@ async function setupRig(): Promise<Rig> {
     animator: {
       transitionTo: (s) => animator.transitionTo(s),
       onTalkToken: (t) => animator.onTalkToken(t),
+      getCurrentState: () => animator.currentState,
       setHoldNextState: (s) => animator.setHoldNextState(s),
     },
     onShutdown: () => {},
@@ -122,6 +123,17 @@ describe("real Animator + state controller (P7)", () => {
     // After the hold, the controller's failure → think transition fires.
     await sleep(120);
     expect(lastSinkFrameText()).toContain(THINK_FRAME);
+  });
+
+  it("accepts reading after the real Animator completes a failure hold", async () => {
+    rig.controller.handle({ state: "failure" });
+    await sleep(120);
+
+    expect(rig.controller.getVisibleState()).toBe("think");
+    rig.controller.handle({ state: "read" });
+    await sleep(30);
+
+    expect(rig.controller.getVisibleState()).toBe("read");
   });
 
   it("Compact lock: compact frame appears and stays visible across ordinary events", async () => {

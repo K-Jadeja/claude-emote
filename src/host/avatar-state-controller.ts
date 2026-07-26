@@ -48,9 +48,9 @@
  * prevention relies on the Animator's own transitionTo() which
  * clears all state timers on every call.
  *
- * No state lives outside this module besides the Animator's own
- * currentState (which the controller never reads — it tracks its
- * own visibleState for cheap introspection).
+ * The Animator is authoritative for the current visible state because
+ * it owns timed transitions. The controller synchronizes its priority
+ * snapshot from the Animator before making each decision.
  */
 
 import type { EmoteState } from "../core/types.js";
@@ -60,6 +60,8 @@ import type { AvatarReaction } from "../claude/event-mapper.js";
 export interface AvatarAnimatorPort {
   transitionTo(state: EmoteState): void;
   onTalkToken(token: string): void;
+  /** Authoritative state, including transitions fired by Animator timers. */
+  getCurrentState(): EmoteState;
   /** Optional: the copied Animator exposes this for failure-to-think. */
   setHoldNextState?(state: EmoteState): void;
 }
@@ -83,9 +85,8 @@ export interface AvatarStateController {
    */
   shutdown(): void;
   /**
-   * The currently visible state as decided by this controller. May
-   * differ from the Animator's internal currentState during the
-   * transient gap between handle() and the next Animator tick.
+   * The currently visible state. Timed Animator transitions are
+   * synchronized before this value is returned.
    */
   getVisibleState(): EmoteState | null;
 }
@@ -109,11 +110,27 @@ export function createAvatarStateController(
   let visibleState: EmoteState | null = null;
   let isShutdown = false;
 
+  /**
+   * The Animator owns hold/talk timers and can transition without a new hook.
+   * Keep the controller's priority snapshot aligned at decision boundaries
+   * rather than introducing a second timer system.
+   *
+   * Preserve the initial null value until this controller has handled its
+   * first reaction. Startup establishes Animator idle before construction,
+   * while null remains useful to callers as "no hook state observed yet".
+   */
+  function syncVisibleState(): void {
+    if (visibleState === null) return;
+    visibleState = animator.getCurrentState();
+  }
+
   function isCompactLocked(): boolean {
+    syncVisibleState();
     return visibleState === "compact";
   }
 
   function isFailureHeld(): boolean {
+    syncVisibleState();
     return visibleState === "failure";
   }
 
@@ -188,7 +205,10 @@ export function createAvatarStateController(
   return {
     handle,
     shutdown,
-    getVisibleState: () => visibleState,
+    getVisibleState: () => {
+      syncVisibleState();
+      return visibleState;
+    },
   };
 }
 

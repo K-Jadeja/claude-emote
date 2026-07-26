@@ -118,18 +118,81 @@ afterAll(async () => {
   }
 });
 
-function get(url: string): Promise<{ status: number; body: string }> {
+function get(
+  url: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: string; headers: import("node:http").IncomingHttpHeaders }> {
   return new Promise((resolveOne, rejectErr) => {
-    const req = request(url, { method: "GET", timeout: 2000 }, (res) => {
+    const req = request(url, { method: "GET", headers, timeout: 2000 }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (c: string) => (body += c));
-      res.on("end", () => resolveOne({ status: res.statusCode ?? 0, body }));
+      res.on("end", () =>
+        resolveOne({
+          status: res.statusCode ?? 0,
+          body,
+          headers: res.headers,
+        }),
+      );
     });
     req.on("error", rejectErr);
     req.on("timeout", () => {
       req.destroy();
       rejectErr(new Error("timeout"));
+    });
+    req.end();
+  });
+}
+
+function readInitialSseEvent(url: string): Promise<{
+  event: string;
+  data: unknown;
+  headers: import("node:http").IncomingHttpHeaders;
+}> {
+  return new Promise((resolveOne, rejectErr) => {
+    let settled = false;
+    const req = request(
+      url,
+      {
+        method: "GET",
+        headers: {
+          accept: "text/event-stream",
+          origin: "http://127.0.0.1:61234",
+        },
+        timeout: 2_000,
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => {
+          body += chunk;
+          const blocks = body.split("\n\n");
+          const block = blocks.find((candidate) =>
+            candidate.includes("event: snapshot"),
+          );
+          if (!block || settled) return;
+          const event = block
+            .split("\n")
+            .find((line) => line.startsWith("event: "))
+            ?.slice("event: ".length);
+          const data = block
+            .split("\n")
+            .find((line) => line.startsWith("data: "))
+            ?.slice("data: ".length);
+          if (!event || !data) return;
+          settled = true;
+          resolveOne({ event, data: JSON.parse(data), headers: res.headers });
+          req.destroy();
+        });
+      },
+    );
+    req.on("error", (error) => {
+      if (!settled) rejectErr(error);
+    });
+    req.on("timeout", () => {
+      if (settled) return;
+      req.destroy();
+      rejectErr(new Error("SSE snapshot timeout"));
     });
     req.end();
   });
@@ -191,6 +254,50 @@ describe("avatar-server (M4 integration)", () => {
     const res = await post(`http://127.0.0.1:${port}/event`, fixture);
     const body = JSON.parse(res.body);
     expect(body.reaction.state).toBe("read");
+  });
+
+  it("exposes only privacy-minimal semantic state after a real hook payload", async () => {
+    const res = await get(`http://127.0.0.1:${port}/state`, {
+      origin: "http://localhost:61234",
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe(
+      "http://localhost:61234",
+    );
+    const state = JSON.parse(res.body);
+    expect(state.activity).toBe("reading");
+    expect(Object.keys(state)).toEqual([
+      "sessionId",
+      "sequence",
+      "status",
+      "activity",
+      "timestamp",
+    ]);
+    expect(res.body).not.toContain("tool_name");
+    expect(res.body).not.toContain("tool_input");
+  });
+
+  it("starts an SSE subscriber with the authoritative snapshot", async () => {
+    const event = await readInitialSseEvent(
+      `http://127.0.0.1:${port}/stream`,
+    );
+    expect(event.event).toBe("snapshot");
+    expect(event.data).toMatchObject({
+      activity: "reading",
+      status: "running",
+    });
+    expect(event.headers["content-type"]).toContain("text/event-stream");
+    expect(event.headers["access-control-allow-origin"]).toBe(
+      "http://127.0.0.1:61234",
+    );
+  });
+
+  it("rejects a non-loopback browser origin from state endpoints", async () => {
+    const res = await get(`http://127.0.0.1:${port}/state`, {
+      origin: "https://evil.example",
+    });
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error).toBe("origin_forbidden");
   });
 
   it("accepts a Stop fixture and returns idle", async () => {

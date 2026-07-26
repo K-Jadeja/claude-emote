@@ -16,10 +16,17 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mapEventSafe, type AvatarReaction } from "../claude/event-mapper.js";
+import type { PetSessionState } from "../shared/pet-session-state.js";
 import type { AvatarOutputPolicy } from "./output-policy.js";
 
 const MAX_BODY_BYTES = 256 * 1024; // matches bridge contract.
 const REQUEST_TIMEOUT_MS = 5_000;
+const SSE_HEARTBEAT_MS = 15_000;
+
+export interface PetSessionStateSource {
+  getSnapshot(): PetSessionState;
+  subscribe(listener: (state: PetSessionState) => void): () => void;
+}
 
 export interface AvatarServerOptions {
   instanceId: string;
@@ -28,6 +35,8 @@ export interface AvatarServerOptions {
   onEvent: (reaction: AvatarReaction, rawEvent: unknown) => void;
   /** Called for every accepted event with the raw event for talk-token forwarding. */
   onMessageDisplayDelta?: (content: string) => void;
+  /** Privacy-minimal snapshot and update stream consumed by the desktop pet. */
+  sessionState: PetSessionStateSource;
   /**
    * Output policy for every diagnostic the server emits. When the
    * server runs inside a Windows Terminal visual pane the policy
@@ -87,6 +96,46 @@ function writeJson(res: ServerResponse, code: number, obj: unknown): void {
   res.end(JSON.stringify(obj));
 }
 
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const parsed = new URL(origin);
+    return (
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "127.0.0.1" ||
+        parsed.hostname === "localhost" ||
+        parsed.hostname === "[::1]")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Browser reads are restricted to another loopback HTTP origin. Requests
+ * without Origin remain available to the local CLI and integration tests.
+ */
+function applyStateCors(req: IncomingMessage, res: ServerResponse): boolean {
+  const origin = req.headers.origin;
+  if (origin === undefined) return true;
+  if (!isLoopbackOrigin(origin)) {
+    writeJson(res, 403, { ok: false, error: "origin_forbidden" });
+    return false;
+  }
+  res.setHeader("access-control-allow-origin", origin);
+  res.setHeader("vary", "Origin");
+  return true;
+}
+
+function writeSseEvent(
+  res: ServerResponse,
+  eventName: "snapshot" | "state",
+  state: PetSessionState,
+): void {
+  res.write(`id: ${state.sequence}\n`);
+  res.write(`event: ${eventName}\n`);
+  res.write(`data: ${JSON.stringify(state)}\n\n`);
+}
+
 /**
  * Build the HTTP server. Does NOT call listen() — the caller passes a
  * `port` and we listen in startServer() so the caller can introspect
@@ -94,6 +143,7 @@ function writeJson(res: ServerResponse, code: number, obj: unknown): void {
  */
 export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
   return new Promise((resolve, reject) => {
+    const stateClients = new Set<ServerResponse>();
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
@@ -107,6 +157,44 @@ export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
           // when the launcher passed --port=0).
           port: opts.port,
         });
+      }
+
+      if (req.method === "GET" && url.pathname === "/state") {
+        if (!applyStateCors(req, res)) return;
+        res.setHeader("cache-control", "no-store");
+        return writeJson(res, 200, opts.sessionState.getSnapshot());
+      }
+
+      if (req.method === "GET" && url.pathname === "/stream") {
+        if (!applyStateCors(req, res)) return;
+        res.statusCode = 200;
+        res.setHeader("content-type", "text/event-stream");
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("connection", "keep-alive");
+        res.setHeader("x-accel-buffering", "no");
+        res.flushHeaders();
+        res.write("retry: 1000\n\n");
+        stateClients.add(res);
+
+        const unsubscribe = opts.sessionState.subscribe((state) => {
+          if (!res.writableEnded) writeSseEvent(res, "state", state);
+        });
+        const heartbeat = setInterval(() => {
+          if (!res.writableEnded) res.write(": heartbeat\n\n");
+        }, SSE_HEARTBEAT_MS);
+        heartbeat.unref();
+        let cleanedUp = false;
+        const cleanup = () => {
+          if (cleanedUp) return;
+          cleanedUp = true;
+          clearInterval(heartbeat);
+          unsubscribe();
+          stateClients.delete(res);
+        };
+        req.once("close", cleanup);
+        res.once("close", cleanup);
+        writeSseEvent(res, "snapshot", opts.sessionState.getSnapshot());
+        return;
       }
 
       if (req.method !== "POST" || url.pathname !== "/event") {
@@ -159,10 +247,13 @@ export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
         server,
         port,
         url,
-        close: () =>
-          new Promise<void>((r) => {
+        close: () => {
+          for (const client of stateClients) client.end();
+          stateClients.clear();
+          return new Promise<void>((r) => {
             server.close(() => r());
-          }),
+          });
+        },
       });
     });
   });

@@ -1,5 +1,8 @@
 node_modules/
 dist/
+desktop/dist/
+desktop/resources/
+desktop/bin/
 *.log
 *.ndjson
 *.pid

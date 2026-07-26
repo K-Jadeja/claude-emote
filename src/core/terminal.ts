@@ -45,8 +45,9 @@ export function detectTerminalName(): string {
 export function resolveRenderer(
   terminals: TerminalMapping[],
   userConfiguredTerminals: Set<string>,
+  terminalName: string = detectTerminalName(),
 ): ResolvedRenderer {
-  const name = detectTerminalName();
+  const name = terminalName;
   log(`terminal: detected "${name}"`);
 
   if (MULTIPLEXERS.has(name)) {

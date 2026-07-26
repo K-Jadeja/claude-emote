@@ -52,7 +52,7 @@ describe("renderer factory + emote selection (P6)", () => {
     const cfg = baseConfig({
       terminals: [{ match: "unknown", render: "ascii" }],
     });
-    const kind = resolveRendererKind(cfg, new Set(["unknown"]));
+    const kind = resolveRendererKind(cfg, new Set(["unknown"]), "unknown");
     expect(kind).toBe("ascii");
     const sel = resolveEmoteSelection("", kind);
     expect(sel.directory).toBe(BUNDLED_ASCII_EMOTE_DIR);
@@ -69,6 +69,7 @@ describe("renderer factory + emote selection (P6)", () => {
       PACKAGE_ROOT,
       BUNDLED_ASCII_EMOTE_DIR,
       new Set(["unknown"]),
+      "unknown",
     );
     // Force a known state.
     expect(renderer.showFrame("idle", "default")).toBe(true);
@@ -85,7 +86,7 @@ describe("renderer factory + emote selection (P6)", () => {
     const cfg = baseConfig({
       terminals: [{ match: "unknown", render: "sixel" }],
     });
-    const kind = resolveRendererKind(cfg, new Set(["unknown"]));
+    const kind = resolveRendererKind(cfg, new Set(["unknown"]), "unknown");
     expect(kind).toBe("image");
     const sel = resolveEmoteSelection("", kind);
     expect(sel.directory).toBe(BUNDLED_IMAGE_EMOTE_DIR);
@@ -103,6 +104,7 @@ describe("renderer factory + emote selection (P6)", () => {
       PACKAGE_ROOT,
       BUNDLED_IMAGE_EMOTE_DIR,
       new Set(["unknown"]),
+      "unknown",
     );
     // The BaseImageRenderer stores its frame map internally. We can
     // exercise showFrame/showRandomFrame which return false when no

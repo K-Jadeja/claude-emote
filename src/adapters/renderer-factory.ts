@@ -41,8 +41,13 @@ export interface RendererFactoryResult {
 export function resolveRendererKind(
   config: Config,
   userConfiguredTerminals: Set<string> = new Set(),
+  terminalName: string = detectTerminalName(),
 ): "ascii" | "image" {
-  const resolved = resolveRenderer(config.terminals, userConfiguredTerminals);
+  const resolved = resolveRenderer(
+    config.terminals,
+    userConfiguredTerminals,
+    terminalName,
+  );
   return resolved.protocol === "ascii" ? "ascii" : "image";
 }
 
@@ -76,8 +81,13 @@ export function createRenderer(
   extDir: string,
   emoteSetDir: string,
   userConfiguredTerminals: Set<string> = new Set(),
+  terminalName: string = detectTerminalName(),
 ): RendererFactoryResult {
-  const resolved = resolveRenderer(config.terminals, userConfiguredTerminals);
+  const resolved = resolveRenderer(
+    config.terminals,
+    userConfiguredTerminals,
+    terminalName,
+  );
   // For tmux auto-passthrough, we need a different concrete class.
   let renderer: Renderer;
   if (resolved.multiplexer === "tmux") {
@@ -85,7 +95,7 @@ export function createRenderer(
     else if (resolved.protocol === "kitty-unicode") renderer = new TmuxKittyUnicodeRenderer(config.imageSize ?? config.size);
     else if (resolved.protocol === "iterm2") renderer = new TmuxITermRenderer(config.imageSize ?? config.size);
     else renderer = new AsciiRenderer();
-  } else if (resolved.protocol === "iterm2" && detectTerminalName() === "wezterm") {
+  } else if (resolved.protocol === "iterm2" && terminalName === "wezterm") {
     renderer = new WezTermITermRenderer(config.size);
   } else {
     renderer = buildRenderer(resolved, config);

@@ -25,8 +25,10 @@ interface Fake {
   holdTimer: ReturnType<typeof setTimeout> | null;
   tick: number;
   shutdownCalls: number;
+  currentState: EmoteState;
   transitionTo(state: EmoteState): void;
   onTalkToken(token: string): void;
+  getCurrentState(): EmoteState;
   setHoldNextState(state: EmoteState): void;
 }
 
@@ -39,7 +41,9 @@ function makeFake(): Fake {
     holdTimer: null,
     tick: 0,
     shutdownCalls: 0,
+    currentState: "idle",
     transitionTo(state) {
+      fake.currentState = state;
       fake.transitions.push({ state, at: fake.tick++ });
       if (fake.holdTimer) {
         clearTimeout(fake.holdTimer);
@@ -51,6 +55,9 @@ function makeFake(): Fake {
     },
     onTalkToken(token) {
       fake.tokens.push({ token, at: fake.tick++ });
+    },
+    getCurrentState() {
+      return fake.currentState;
     },
     setHoldNextState(state) {
       fake.holdNext.push({ state, at: fake.tick++ });
@@ -76,6 +83,7 @@ describe("hook event → state controller sequences (P7)", () => {
       animator: {
         transitionTo: (s) => fake.transitionTo(s),
         onTalkToken: (t) => fake.onTalkToken(t),
+        getCurrentState: () => fake.getCurrentState(),
         setHoldNextState: (s) => fake.setHoldNextState(s),
       },
       onShutdown: () => { fake.shutdownCalls++; },

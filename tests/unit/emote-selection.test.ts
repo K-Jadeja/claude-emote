@@ -261,19 +261,23 @@ describe("renderer kind resolution (P6)", () => {
   // renderer-factory adapter (no frame loading).
   it("returns 'ascii' for a config that maps 'unknown' to ascii", async () => {
     const { resolveRendererKind } = await import("../../src/adapters/renderer-factory.js");
-    const kind = resolveRendererKind({
-      enabled: true,
-      debug: false,
-      size: 8,
-      readingSpeed: 4,
-      hideBelow: 30,
-      holdDuration: { hi: 2000, success: 1200, failure: 1200 },
-      blinkInterval: [3000, 6000],
-      talkTickMs: 120,
-      cycleMs: 500,
-      emotes: [{ model: "*", "emote-set": "ascii" }],
-      terminals: [{ match: "unknown", render: "ascii" }],
-    });
+    const kind = resolveRendererKind(
+      {
+        enabled: true,
+        debug: false,
+        size: 8,
+        readingSpeed: 4,
+        hideBelow: 30,
+        holdDuration: { hi: 2000, success: 1200, failure: 1200 },
+        blinkInterval: [3000, 6000],
+        talkTickMs: 120,
+        cycleMs: 500,
+        emotes: [{ model: "*", "emote-set": "ascii" }],
+        terminals: [{ match: "unknown", render: "ascii" }],
+      },
+      new Set(["unknown"]),
+      "unknown",
+    );
     expect(kind).toBe("ascii");
   });
 
@@ -298,6 +302,7 @@ describe("renderer kind resolution (P6)", () => {
         terminals: [{ match: "unknown", render: "sixel" }],
       },
       new Set(["unknown"]),
+      "unknown",
     );
     expect(kind).toBe("image");
   });

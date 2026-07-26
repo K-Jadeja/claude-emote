@@ -59,6 +59,7 @@ import {
   createAvatarStateController,
   type AvatarStateController,
 } from "./avatar-state-controller.js";
+import { createPetSessionStateTracker } from "./pet-session-state-tracker.js";
 import {
   resolveEmoteSelection,
   type EmoteSelection,
@@ -227,6 +228,7 @@ async function main(): Promise<void> {
     animator: {
       transitionTo: (state) => animator.transitionTo(state),
       onTalkToken: (token) => animator.onTalkToken(token),
+      getCurrentState: () => animator.currentState,
       setHoldNextState: (state) => animator.setHoldNextState(state),
     },
     onShutdown: () => shutdown("session_end"),
@@ -236,8 +238,12 @@ async function main(): Promise<void> {
 
   let server: AvatarServer | null = null;
   let shuttingDown = false;
+  const sessionState = createPetSessionStateTracker(instanceId);
 
-  function onEvent(reaction: AvatarReaction, _raw: unknown): void {
+  function onEvent(reaction: AvatarReaction, raw: unknown): void {
+    // Publish only the five-field semantic state. The raw hook payload is
+    // never retained or exposed by the desktop protocol.
+    sessionState.apply(raw, reaction);
     stateController.handle(reaction);
   }
 
@@ -296,6 +302,7 @@ async function main(): Promise<void> {
       instanceId,
       port,
       onEvent,
+      sessionState,
       policy,
       // Note: avatar-server.ts previously called a separate
       // onMessageDisplayDelta callback. Phase 7 routes talk tokens
