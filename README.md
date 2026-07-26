@@ -469,6 +469,12 @@ If it opens as an opaque rectangle, update WebView2 and confirm that
 `modes.window.transparent` remains enabled in
 `desktop/neutralino.config.json`.
 
+If the taskbar icon appears but the pet does not, update this checkout and
+restart the `claude-emote` session. The launcher must not spawn the native GUI
+with hidden-window startup state, and the shell now repairs saved positions
+that would place a high-DPI window beyond the display edge. See
+[`docs/incidents/2026-07-27-native-pet-window-hidden.md`](docs/incidents/2026-07-27-native-pet-window-hidden.md).
+
 ### The desktop overlay says disconnected
 
 In live mode, confirm the per-session avatar host is still running and that the

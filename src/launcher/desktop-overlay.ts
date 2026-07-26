@@ -93,7 +93,10 @@ export function buildDesktopOverlaySpawnSpec(
       detached: false,
       shell: false,
       stdio: "ignore",
-      windowsHide: true,
+      // Do not set STARTF_USESHOWWINDOW/SW_HIDE for a GUI executable.
+      // Neutralino can otherwise create a healthy WebView and taskbar entry
+      // while its actual native window remains invisible.
+      windowsHide: false,
     },
   };
 }

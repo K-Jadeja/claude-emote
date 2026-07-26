@@ -87,6 +87,15 @@ Confirm WebView2 is current and that `modes.window.transparent` is enabled in
 `desktop/neutralino.config.json`. Transparent mode intentionally makes the
 window borderless.
 
+### Overlay has a taskbar icon but no visible window
+
+Check `src/launcher/desktop-overlay.ts` before changing UI opacity. A GUI child
+must use `windowsHide: false`. The shell also calls `window.show()`, verifies
+visibility, and clamps saved geometry after DPI-aware sizing. Reproduce with a
+production-shaped launcher run, not demo mode alone. The root cause and
+regression checklist are in
+`docs/incidents/2026-07-27-native-pet-window-hidden.md`.
+
 ### Overlay build reports a missing frame
 
 Restore the named file or correct the frame map. Missing semantic poses are

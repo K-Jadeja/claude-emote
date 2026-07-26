@@ -54,5 +54,8 @@ describe("desktop overlay resolution", () => {
     expect(spec.args.join(" ")).not.toContain("3210");
     expect(spec.options.env?.CLAUDE_EMOTE_ENDPOINT).toContain("3210");
     expect(spec.options.env?.CLAUDE_EMOTE_CAPABILITY_TOKEN).toBe(TOKEN);
+    // Regression: windowsHide also hides Neutralino's GUI window even though
+    // the process and taskbar icon remain alive.
+    expect(spec.options.windowsHide).toBe(false);
   });
 });

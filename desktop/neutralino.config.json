@@ -22,7 +22,11 @@
     "window.setBorderless",
     "window.setDraggableRegion",
     "window.getSize",
-    "window.setSize"
+    "window.setSize",
+    "window.show",
+    "window.isVisible",
+    "window.getPosition",
+    "window.move"
   ],
   "modes": {
     "window": {

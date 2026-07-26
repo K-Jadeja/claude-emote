@@ -2,6 +2,39 @@ type NeutralinoApi = typeof import("@neutralinojs/lib");
 
 const DESIGN_WIDTH = 272;
 const DESIGN_HEIGHT = 324;
+const WINDOW_EDGE_MARGIN = 16;
+
+export interface WindowPosition {
+  x: number;
+  y: number;
+}
+
+export interface WindowBounds {
+  width: number;
+  height: number;
+}
+
+export function clampWindowPosition(
+  position: WindowPosition,
+  size: WindowBounds,
+  availableScreen: WindowPosition & WindowBounds,
+  displayScale: number,
+  margin = WINDOW_EDGE_MARGIN,
+): WindowPosition {
+  const scale = Math.max(1, displayScale);
+  const left = Math.round(availableScreen.x * scale) + margin;
+  const top = Math.round(availableScreen.y * scale) + margin;
+  const right =
+    Math.round((availableScreen.x + availableScreen.width) * scale) - margin;
+  const bottom =
+    Math.round((availableScreen.y + availableScreen.height) * scale) - margin;
+  const maxX = Math.max(left, right - size.width);
+  const maxY = Math.max(top, bottom - size.height);
+  return {
+    x: Math.min(maxX, Math.max(left, position.x)),
+    y: Math.min(maxY, Math.max(top, position.y)),
+  };
+}
 
 export interface PetShell {
   readonly kind: "neutralino" | "browser";
@@ -33,6 +66,51 @@ function waitForNativeReady(api: NeutralinoApi, timeoutMs = 5_000): Promise<void
   });
 }
 
+async function ensureNativeWindowVisible(api: NeutralinoApi): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await api.window.show();
+    if (await api.window.isVisible()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Neutralino native window remained hidden after show()");
+}
+
+async function keepNativeWindowOnScreen(
+  api: NeutralinoApi,
+  displayScale: number,
+): Promise<void> {
+  const [position, size] = await Promise.all([
+    api.window.getPosition(),
+    api.window.getSize(),
+  ]);
+  if (
+    typeof position.x !== "number" ||
+    typeof position.y !== "number" ||
+    typeof size.width !== "number" ||
+    typeof size.height !== "number"
+  ) {
+    throw new Error("Neutralino returned incomplete window geometry");
+  }
+  const browserScreen = globalThis.screen as Screen & {
+    availLeft?: number;
+    availTop?: number;
+  };
+  const clamped = clampWindowPosition(
+    { x: position.x, y: position.y },
+    { width: size.width, height: size.height },
+    {
+      x: browserScreen.availLeft ?? 0,
+      y: browserScreen.availTop ?? 0,
+      width: browserScreen.availWidth,
+      height: browserScreen.availHeight,
+    },
+    displayScale,
+  );
+  if (clamped.x !== position.x || clamped.y !== position.y) {
+    await api.window.move(clamped.x, clamped.y);
+  }
+}
+
 function createNativeShell(api: NeutralinoApi): PetShell {
   return {
     kind: "neutralino",
@@ -48,6 +126,8 @@ function createNativeShell(api: NeutralinoApi): PetShell {
         width: Math.round(DESIGN_WIDTH * displayScale),
         height: Math.round(DESIGN_HEIGHT * displayScale),
       });
+      await keepNativeWindowOnScreen(api, displayScale);
+      await ensureNativeWindowVisible(api);
       await api.events.on("windowClose", () => {
         void api.app.exit(0);
       });

@@ -7,6 +7,7 @@ import {
   readFile,
   rm,
   stat,
+  writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,6 +130,34 @@ for (const relativePath of framePaths) {
 }
 
 await requireFile(configuredIconPath, "Neutralino window icon");
+
+const iconPng = await readFile(configuredIconPath);
+const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+if (!iconPng.subarray(0, pngSignature.length).equals(pngSignature)) {
+  throw new Error(`Neutralino window icon must be a PNG: ${configuredIconPath}`);
+}
+const iconWidth = iconPng.readUInt32BE(16);
+const iconHeight = iconPng.readUInt32BE(20);
+if (iconWidth < 1 || iconHeight < 1) {
+  throw new Error(`Neutralino window icon has invalid dimensions: ${configuredIconPath}`);
+}
+// ICO supports PNG-compressed image entries. Generate the conventional
+// /resources/favicon.ico expected by WebView2 and Neutralino so startup does
+// not emit a misleading missing-resource error.
+const favicon = Buffer.alloc(22 + iconPng.length);
+favicon.writeUInt16LE(0, 0);
+favicon.writeUInt16LE(1, 2);
+favicon.writeUInt16LE(1, 4);
+favicon.writeUInt8(iconWidth >= 256 ? 0 : iconWidth, 6);
+favicon.writeUInt8(iconHeight >= 256 ? 0 : iconHeight, 7);
+favicon.writeUInt8(0, 8);
+favicon.writeUInt8(0, 9);
+favicon.writeUInt16LE(1, 10);
+favicon.writeUInt16LE(32, 12);
+favicon.writeUInt32LE(iconPng.length, 14);
+favicon.writeUInt32LE(22, 18);
+iconPng.copy(favicon, 22);
+await writeFile(join(outputRoot, "favicon.ico"), favicon);
 
 await build({
   entryPoints: [join(sourceRoot, "main.ts")],

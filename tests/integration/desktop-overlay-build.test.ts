@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -22,5 +23,17 @@ describe("desktop overlay resource build", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("[overlay] built 19 validated frames");
     expect(result.stdout).toContain("desktop\\resources");
+    const faviconPath = join(
+      PROJECT_ROOT,
+      "desktop",
+      "resources",
+      "favicon.ico",
+    );
+    expect(existsSync(faviconPath)).toBe(true);
+    const favicon = readFileSync(faviconPath);
+    expect([...favicon.subarray(0, 4)]).toEqual([0, 0, 1, 0]);
+    expect(favicon.includes(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe(
+      true,
+    );
   });
 });
