@@ -30,10 +30,19 @@ unauthenticated health response says only whether a capability is required.
 | `GET /stream` | Authenticated server-sent state stream |
 | `POST /overlay-ready` | Overlay acknowledges its first connected render |
 | `GET /overlay-health` | Launcher waits for the readiness acknowledgement |
+| `POST /focus` | Authenticated best-effort "bring terminal to front" (WT-only) |
 
 The overlay uses streaming `fetch`, not `EventSource`, because the request must
 carry an authorization header. The client reconnects with bounded exponential
 backoff, receives a fresh snapshot, and ignores stale sequence numbers.
+
+`POST /focus` is idempotent and side-effect-bounded. It returns `204` whether
+or not the focus could actually be performed — e.g. when running outside
+Windows Terminal, when `wt.exe` is not locatable, when the pane no longer
+exists, or when the user has already closed it. It never returns state, never
+mutates the snapshot, and never blocks. The resolver lives entirely in the
+per-session host and does not require any additional privileges. It does not
+transmit pane contents, terminal buffers, or any user data.
 
 ## State shape
 

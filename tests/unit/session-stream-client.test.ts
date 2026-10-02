@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createSessionStreamClient,
+  notifyOverlayFocus,
   notifyOverlayReady,
   resolveSessionStreamUrl,
 } from "../../desktop/src/session-stream-client";
@@ -148,5 +149,38 @@ describe("desktop session stream client", () => {
       fetchImpl,
     );
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("asks the host to focus the terminal pane with the same header contract", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
+      expect(String(url)).toBe("http://127.0.0.1:4312/focus");
+      expect(String(url)).not.toContain(TOKEN);
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("authorization")).toBe(
+        `Bearer ${TOKEN}`,
+      );
+      return new Response(null, { status: 204 });
+    });
+
+    await notifyOverlayFocus(
+      "http://127.0.0.1:4312/event",
+      TOKEN,
+      fetchImpl,
+    );
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("treats any 2xx as focus success and throws on server failure", async () => {
+    const okFetch = vi.fn<typeof fetch>(async () => new Response(null, { status: 200 }));
+    await expect(
+      notifyOverlayFocus("http://127.0.0.1:4312/event", TOKEN, okFetch),
+    ).resolves.toBeUndefined();
+
+    const serverErr = vi.fn<typeof fetch>(
+      async () => new Response("boom", { status: 500 }),
+    );
+    await expect(
+      notifyOverlayFocus("http://127.0.0.1:4312/event", TOKEN, serverErr),
+    ).rejects.toThrow("HTTP 500");
   });
 });

@@ -17,6 +17,7 @@ import { createAvatarOutputPolicy } from "./output-policy.js";
 import { createPetSessionStateTracker } from "./pet-session-state-tracker.js";
 import type { AvatarReaction } from "../claude/event-mapper.js";
 import { requireSessionCapability } from "../shared/session-capability.js";
+import { createWindowsTerminalFocus } from "./focus-windows-terminal.js";
 
 const DEFAULT_SESSION_END_GRACE_MS = 2_000;
 
@@ -61,6 +62,20 @@ async function main(): Promise<void> {
 
   const { instanceId, port, parentPid } = options;
   const sessionState = createPetSessionStateTracker(instanceId);
+  // The launcher inherits WT_SESSION from the user's shell and passes
+  // it through as CLAUDE_EMOTE_WT_WINDOW_ID. The host uses that GUID
+  // as the `-w <id>` arg to `wt.exe focus-tab`. Without a known
+  // window id, the focuser refuses to call `wt.exe` because `-w 0`
+  // would open a new window rather than focus one.
+  const wtExecutableRaw = process.env.CLAUDE_EMOTE_WT_EXE?.trim() ?? "";
+  const wtExecutable = wtExecutableRaw === "" ? null : wtExecutableRaw;
+  const wtWindowIdRaw = process.env.CLAUDE_EMOTE_WT_WINDOW_ID?.trim() ?? "";
+  const wtWindowId = wtWindowIdRaw === "" ? null : wtWindowIdRaw;
+  const focuser = createWindowsTerminalFocus({
+    wtExecutable,
+    wtWindowId,
+    diagnostics: (line) => policy.writeDiagnostic(line),
+  });
   let server: AvatarServer | null = null;
   let shuttingDown = false;
   let sessionEndTimer: NodeJS.Timeout | null = null;
@@ -116,6 +131,7 @@ async function main(): Promise<void> {
       sessionState,
       capabilityToken,
       policy,
+      focuser,
     });
     policy.writeReady(
       `CLAUDE_EMOTE_SESSION_READY url=${server.url} instance=${instanceId} port=${server.port} parentPid=${parentPid ?? "null"}\n`,

@@ -35,4 +35,23 @@ describe("desktop native shell configuration", () => {
     expect(source).toContain("await api.window.isVisible()");
     expect(source).toContain("await api.window.move(clamped.x, clamped.y)");
   });
+
+  it("exposes the focus terminal button only in live mode", () => {
+    const markup = readFileSync(
+      join(PROJECT_ROOT, "desktop", "src", "index.html"),
+      "utf8",
+    );
+    const styles = readFileSync(
+      join(PROJECT_ROOT, "desktop", "src", "styles.css"),
+      "utf8",
+    );
+
+    expect(markup).toContain('id="focus-button"');
+    expect(markup).toMatch(/aria-label="Focus terminal"/);
+    // The existing live-mode hide rule must be extended to also hide
+    // the focus button in demo mode (it is a live-mode-only action).
+    expect(styles).toMatch(
+      /\.pet-shell\[data-mode="live"\] #pause-button[\s\S]*?\.pet-shell\[data-mode="demo"\] #focus-button[\s\S]*?display: none;/,
+    );
+  });
 });

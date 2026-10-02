@@ -115,8 +115,10 @@ what kind of moment the session is in. The UI should not rely on animation
 alone, because motion may be reduced or missed.
 
 The desktop pet is initially informational. Clicking it must not approve a
-Claude permission request. A future "focus session" action may bring the
-correct terminal to the foreground, but the user still approves inside Claude.
+Claude permission request. The hover-revealed "Focus terminal" action
+(`POST /focus`) brings the originating Windows Terminal pane to the
+foreground — best-effort, pane-precise, and a silent no-op when the host
+is not running inside WT. The user still approves permissions inside Claude.
 
 ## End and cleanup flow
 
@@ -131,7 +133,9 @@ Normal shutdown:
 
 If `SessionEnd` is missing because Claude or the terminal is killed, parent-PID
 watching still closes the host. The overlay shows disconnected rather than
-inventing a successful end state.
+inventing a successful end state. The focus button remains available through
+`disconnected` and `ended` statuses so the user can still reach their
+terminal after a transient drop.
 
 ## Failure behavior
 

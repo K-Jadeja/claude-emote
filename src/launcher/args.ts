@@ -378,6 +378,24 @@ const defaultExec: ExecProbe = {
 };
 
 /**
+ * Environment variable the launcher uses to pass the resolved
+ * `wt.exe` path to its children so the per-session host can
+ * focus the originating Windows Terminal pane on demand. The
+ * launcher strips this from the Claude child's environment via
+ * `withoutCompanionEnv`.
+ */
+export const WT_EXECUTABLE_ENV = "CLAUDE_EMOTE_WT_EXE";
+
+/**
+ * Environment variable the launcher uses to pass the Windows
+ * Terminal window GUID (its own inherited `WT_SESSION` value) to
+ * the per-session host. The host's focuser uses this as the
+ * `-w <id>` arg to `wt.exe focus-tab`. Stripped from the Claude
+ * child by `withoutCompanionEnv`.
+ */
+export const WT_WINDOW_ID_ENV = "CLAUDE_EMOTE_WT_WINDOW_ID";
+
+/**
  * Locate the Windows Terminal executable (`wt.exe`).
  *
  * Resolution order:
@@ -430,7 +448,7 @@ export function findWindowsTerminalExecutable(
   };
 
   // 1) Override.
-  const overrideRaw = env.CLAUDE_EMOTE_WT_EXE;
+  const overrideRaw = env[WT_EXECUTABLE_ENV];
   const override =
     typeof overrideRaw === "string" ? overrideRaw.trim() : "";
   if (override) {

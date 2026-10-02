@@ -281,7 +281,8 @@ button {
 }
 
 .pet-shell[data-mode="live"] #pause-button,
-.pet-shell[data-mode="live"] #next-button {
+.pet-shell[data-mode="live"] #next-button,
+.pet-shell[data-mode="demo"] #focus-button {
   display: none;
 }
 

@@ -241,3 +241,34 @@ export async function notifyOverlayReady(
     );
   }
 }
+
+/**
+ * Ask the per-session host to bring the originating Windows Terminal
+ * pane to the foreground. The endpoint is documented as 204-on-success
+ * and never returns state. Any 2xx is treated as success; non-2xx
+ * throws with the status code so the caller can route it through
+ * `shell.reportError`. Focus is a best-effort UX win — never a
+ * load-bearing side effect.
+ */
+export async function notifyOverlayFocus(
+  endpoint: string,
+  capabilityToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const token = requireSessionCapability(
+    capabilityToken,
+    "Claude Pet session capability",
+  );
+  const response = await fetchImpl(resolveSessionUrl(endpoint, "/focus"), {
+    method: "POST",
+    headers: {
+      authorization: buildCapabilityAuthorization(token),
+    },
+    cache: "no-store",
+  });
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(
+      `Claude Pet focus returned HTTP ${response.status}`,
+    );
+  }
+}

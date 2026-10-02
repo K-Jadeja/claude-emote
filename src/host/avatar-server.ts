@@ -19,6 +19,7 @@ import { mapEventSafe, type AvatarReaction } from "../claude/event-mapper.js";
 import type { PetSessionState } from "../shared/pet-session-state.js";
 import type { AvatarOutputPolicy } from "./output-policy.js";
 import { isCapabilityAuthorized } from "./session-auth.js";
+import type { WindowsTerminalFocus } from "./focus-windows-terminal.js";
 
 const MAX_BODY_BYTES = 256 * 1024; // matches bridge contract.
 const REQUEST_TIMEOUT_MS = 5_000;
@@ -54,6 +55,13 @@ export interface AvatarServerOptions {
    * process.stdout / process.stderr directly.
    */
   policy: AvatarOutputPolicy;
+  /**
+   * Optional WT-pane focuser. When supplied, the `POST /focus`
+   * route attempts to bring the originating Windows Terminal
+   * pane to the foreground. When absent, `/focus` is a silent
+   * 204 no-op (host running in attached / test / non-WT modes).
+   */
+  focuser?: WindowsTerminalFocus;
 }
 
 export interface AvatarServer {
@@ -152,6 +160,7 @@ function isBrowserEndpoint(pathname: string): boolean {
     "/stream",
     "/overlay-ready",
     "/overlay-health",
+    "/focus",
   ].includes(pathname);
 }
 
@@ -256,6 +265,21 @@ export function startServer(opts: AvatarServerOptions): Promise<AvatarServer> {
           ok: overlayReady,
           instanceId: opts.instanceId,
         });
+      }
+
+      if (req.method === "POST" && url.pathname === "/focus") {
+        if (!applyStateCors(req, res)) return;
+        if (!requireCapability(req, res, opts.capabilityToken)) return;
+        // Side-effect-bounded: never returns state, never throws, 204 either way.
+        if (opts.focuser) {
+          const outcome = await opts.focuser.focus();
+          opts.policy.writeDiagnostic(
+            `[avatar-server] /focus: ${JSON.stringify(outcome)}\n`,
+          );
+        }
+        res.statusCode = 204;
+        res.end();
+        return;
       }
 
       if (req.method !== "POST" || url.pathname !== "/event") {

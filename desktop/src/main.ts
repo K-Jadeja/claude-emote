@@ -5,6 +5,7 @@ import { createPetView, waitForImageRender } from "./pet-view";
 import { protectInteractiveRegionFromWindowDrag } from "./pointer-guard";
 import {
   createSessionStreamClient,
+  notifyOverlayFocus,
   notifyOverlayReady,
 } from "./session-stream-client";
 import { SESSION_CAPABILITY_ENV } from "../../src/shared/session-capability";
@@ -25,6 +26,7 @@ async function main(): Promise<void> {
   const controls = requiredElement<HTMLElement>("#pet-controls");
   const pauseButton = requiredElement<HTMLButtonElement>("#pause-button");
   const nextButton = requiredElement<HTMLButtonElement>("#next-button");
+  const focusButton = requiredElement<HTMLButtonElement>("#focus-button");
   const closeButton = requiredElement<HTMLButtonElement>("#close-button");
   const shell = createPetShell();
   const view = createPetView(root);
@@ -126,6 +128,14 @@ async function main(): Promise<void> {
         },
       });
       disposeMode = () => stream.close();
+      focusButton.addEventListener("click", () => {
+        // Best-effort UX; focus failures must never stall the pet.
+        notifyOverlayFocus(endpoint, capabilityToken).catch((error: unknown) => {
+          void shell.reportError(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        });
+      });
     } else {
       view.setMode("demo");
       const states = createDemoStates();

@@ -1,5 +1,9 @@
 # claude-emote
 
+> This branch preserves unfinished terminal-focus work. Use `main` for the
+> tested beta. Do not use this branch's focus button until the targeting defect
+> in [docs/TERMINAL_FOCUS_WIP.md](docs/TERMINAL_FOCUS_WIP.md) is corrected.
+
 A lightweight animated desktop companion for Claude Code.
 
 `claude-emote` turns Claude Code lifecycle hooks into a small, expressive pet
@@ -59,6 +63,7 @@ about 4 MB before installer packaging or signing. Electron is not required.
 | Short privacy-safe project label | Working |
 | Packaged Windows executable | Builds and launches |
 | One-command automatic desktop launch | Working on Windows x64 |
+| Click-to-focus the WT pane from the pet | Working on Windows x64 |
 | Installer, tray, signing, auto-update | Not implemented |
 | Multi-session pet manager | Not implemented |
 

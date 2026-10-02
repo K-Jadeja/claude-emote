@@ -72,6 +72,8 @@ import {
   buildWindowsTerminalArgs,
   decideAvatarLaunchMode,
   findWindowsTerminalExecutable,
+  WT_EXECUTABLE_ENV,
+  WT_WINDOW_ID_ENV,
 } from "./args.js";
 import {
   waitForOwnedAvatarStartup,
@@ -177,6 +179,8 @@ function withoutCompanionEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     SESSION_LABEL_ENV,
     HIDE_SESSION_LABEL_ENV,
     SESSION_CAPABILITY_ENV,
+    WT_EXECUTABLE_ENV,
+    WT_WINDOW_ID_ENV,
   ]) {
     delete env[name];
   }
@@ -276,6 +280,21 @@ async function runDesktopMode(
   const hostIsScript = /\.(cjs|mjs|js)$/i.test(hostExecutable);
   const hostEnv = withoutCompanionEnv(process.env);
   hostEnv[SESSION_CAPABILITY_ENV] = capabilityToken;
+  // Resolve wt.exe so the focus button can reach the user's WT
+  // window if they launched claude-emote from inside Windows Terminal.
+  // Outside WT, findWindowsTerminalExecutable returns null and the
+  // host's focuser permanently no-ops.
+  const wtExecutable = findWindowsTerminalExecutable(process.env, platform);
+  if (wtExecutable !== null) {
+    hostEnv[WT_EXECUTABLE_ENV] = wtExecutable;
+  }
+  // The launcher's own WT_SESSION env var (if any) IS the window GUID
+  // of the user's current WT window. Pass it through so the host can
+  // pass it back to `wt.exe focus-tab -w <id>` without probing.
+  const wtWindowId = process.env.WT_SESSION?.trim() ?? "";
+  if (wtWindowId !== "") {
+    hostEnv[WT_WINDOW_ID_ENV] = wtWindowId;
+  }
   const host = spawn(
     hostIsScript ? process.execPath : hostExecutable,
     hostIsScript ? [hostExecutable, ...hostArgs] : hostArgs,
@@ -606,6 +625,16 @@ async function main(): Promise<void> {
     const wtSpawnEnv = withoutCompanionEnv(process.env);
     wtSpawnEnv.CLAUDE_EMOTE_VISUAL_PANE = "1";
     wtSpawnEnv[SESSION_CAPABILITY_ENV] = capabilityToken;
+    // Pass the resolved wt.exe path so the per-session host can
+    // focus the originating pane on demand (POST /focus). The env
+    // var is stripped from the Claude child by withoutCompanionEnv.
+    wtSpawnEnv[WT_EXECUTABLE_ENV] = candidateWtExe;
+    // Pass through WT_SESSION (the user's WT window GUID) so the
+    // host's focuser can target it without re-probing.
+    const wtWindowIdForPane = process.env.WT_SESSION?.trim() ?? "";
+    if (wtWindowIdForPane !== "") {
+      wtSpawnEnv[WT_WINDOW_ID_ENV] = wtWindowIdForPane;
+    }
     const wtChild = spawn(spawnExe, spawnArgs, {
       shell: false,
       detached: false,
