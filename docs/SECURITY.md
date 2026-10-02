@@ -12,7 +12,7 @@ binds only to `127.0.0.1`.
 
 ## Dependency audit status
 
-Verified on 2026-07-27:
+Verified on 2026-10-02:
 
 ```powershell
 npm audit --omit=dev
@@ -20,23 +20,15 @@ npm audit --omit=dev
 
 reported zero production vulnerabilities.
 
-The full development audit reports seven findings, all below the pinned
-`@neutralinojs/neu@11.7.1` packaging CLI:
+The full development audit reports two moderate findings: `uuid` and its
+parent `@neutralinojs/neu@11.7.1` packaging CLI. There are no high or critical
+findings. Runtime `adm-zip` is updated to 0.6.1; Vitest is pinned to 4.1.11,
+and compatible nanoid and brace-expansion security patches are locked.
 
-- `@electron/asar`
-- `brace-expansion`
-- `glob`
-- `minimatch`
-- `recursive-readdir`
-- `uuid`
-- the CLI package itself
-
-There are no remaining critical findings. Vitest was upgraded to 4.1.10 to
-remove the prior critical test-server advisory and its old Vite chain.
-
-Neutralino CLI 11.7.2 is not currently a safe upgrade: its CommonJS websocket
-module requires ESM-only uuid 14 and crashes before parsing commands on Node
-20. `tests/integration/neutralino-cli.test.ts` locks this exact failure branch;
+Neutralino CLI 11.7.2 previously failed under Node 20: its CommonJS websocket
+module required ESM-only uuid 14 and crashed before parsing commands. The CLI
+remains pinned pending revalidation across the supported Node versions.
+`tests/integration/neutralino-cli.test.ts` checks this failure boundary;
 see `docs/incidents/2026-07-27-neutralino-cli-esm-breakage.md`.
 
 The affected CLI is a local development/packaging tool. It is not bundled in
@@ -59,6 +51,7 @@ npm test
 npm run overlay:package
 ```
 
-Before public distribution, add a per-session capability token to the local
-state stream and complete signing/notarization for each platform.
+The local event/state/stream endpoints now require a per-session capability
+token. Signing and installer distribution remain outstanding. See
+`GITHUB_PUBLICATION.md` for the current beta's validation boundaries.
 

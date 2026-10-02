@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const ROOT = resolve(process.cwd());
@@ -133,7 +133,7 @@ describe("one-command desktop launcher", () => {
     expect(claude.hideSessionLabel).toBeNull();
 
     const overlay = JSON.parse(readFileSync(OVERLAY_RECORD, "utf8"));
-    expect(overlay.sessionLabel).toBe("claudecodeavatar");
+    expect(overlay.sessionLabel).toBe(basename(ROOT));
     expect(overlay.hideSessionLabel).toBeNull();
     expect(overlay.tokenPresent).toBe(true);
     expect(overlay.tokenInArgv).toBe(false);

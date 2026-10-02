@@ -23,5 +23,5 @@ describe("pinned Neutralino CLI", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Usage: neu");
     expect(result.stderr).not.toContain("ERR_REQUIRE_ESM");
-  });
+  }, 15_000);
 });

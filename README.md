@@ -1,6 +1,35 @@
 # claude-emote
 
-A lightweight animated desktop companion for Claude Code.
+![Claude Emote — a little company while you code](docs/assets/github-cover.png)
+
+**A little company while you code.** An animated desktop companion that follows
+your Claude Code session: thinking, reading, writing, using tools, and ready for you.
+
+[Get started](#install-from-this-repository) · [Try the demo](#run-the-desktop-pet-demo) ·
+[Validation and roadmap](docs/GITHUB_PUBLICATION.md) · [Development](docs/DEVELOPMENT.md)
+
+![Actual desktop demo states: thinking, reading, writing, and ready](docs/assets/demo-gallery.png)
+
+<details>
+<summary>Watch all nine poses</summary>
+
+<p align="center"><img src="docs/assets/demo-cycle.gif" width="272" height="324" alt="Actual application demo cycling through greeting, idle, thinking, reading, writing, tools, talking, compaction, and failure"></p>
+
+The gallery and animation use the real application UI with synthetic demo events.
+The cover is promotional artwork. [Visual sources and reproduction](docs/VISUALS.md).
+
+</details>
+
+## Current release status
+
+This repository contains a Windows beta for Claude Code. It does not integrate
+with Codex. The desktop and terminal companions are implemented, but installer,
+signing, auto-update, and multi-session management remain unfinished. See
+[`docs/GITHUB_PUBLICATION.md`](docs/GITHUB_PUBLICATION.md) for current test
+evidence and the checks still needed before a public release.
+
+The CLI command remains `claude-emote`. Its bundled third-party plugin is named
+`emote-companion` to satisfy current Claude Code plugin-name validation.
 
 `claude-emote` turns Claude Code lifecycle hooks into a small, expressive pet
 that shows when a session is thinking, reading, writing, using tools, waiting
@@ -9,7 +38,7 @@ not make another model call.
 
 The project has two supported renderers:
 
-- a production-tested terminal renderer that runs beside Claude Code in
+- a terminal renderer that runs beside Claude Code in
   Windows Terminal;
 - a transparent desktop overlay built with Neutralinojs and the operating
   system WebView.
@@ -54,7 +83,7 @@ about 4 MB before installer packaging or signing. Electron is not required.
 | Desktop demo with every pose | Working |
 | Live semantic state snapshot and SSE stream | Working |
 | Permission-needed and session-ended states | Working |
-| Window dragging and position persistence | Working |
+| Window dragging and position persistence | Implemented; drag movement needs a fresh manual check |
 | Windows display scaling | Tested |
 | Short privacy-safe project label | Working |
 | Packaged Windows executable | Builds and launches |
@@ -82,7 +111,7 @@ required.
 ## Install from this repository
 
 ```powershell
-git clone <repository-url> claude-emote
+git clone https://github.com/K-Jadeja/claude-emote.git
 cd claude-emote
 npm ci
 npm run build

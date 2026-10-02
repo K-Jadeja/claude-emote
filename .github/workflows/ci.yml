@@ -1,0 +1,25 @@
+name: Windows checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run overlay:typecheck
+      - run: npm run verify:upstream
+      - run: npm test
+      - run: npm run overlay:package
+      - run: npm run audit:runtime
