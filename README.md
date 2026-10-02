@@ -2,8 +2,11 @@
 
 ![Claude Emote — a little company while you code](docs/assets/github-cover.png)
 
-**A little company while you code.** An animated desktop companion that follows
-your Claude Code session: thinking, reading, writing, using tools, and ready for you.
+i wanted my coding agent to have a face. saw pi-emote and wanted that for claude code, so i built this.
+
+she sits next to your terminal and reacts while claude thinks, reads files, writes code, or needs your approval. just a little company while you work. no extra model calls.
+
+using mcode? i made [mcode-emote](https://github.com/K-Jadeja/mcode-emote) for that too.
 
 [Get started](#install-from-this-repository) · [Try the demo](#run-the-desktop-pet-demo) ·
 [Validation and roadmap](docs/GITHUB_PUBLICATION.md) · [Development](docs/DEVELOPMENT.md)
@@ -26,7 +29,7 @@ This repository contains a Windows beta for Claude Code. It does not integrate
 with Codex. The desktop and terminal companions are implemented, but installer,
 signing, auto-update, and multi-session management remain unfinished. See
 [`docs/GITHUB_PUBLICATION.md`](docs/GITHUB_PUBLICATION.md) for current test
-evidence and the checks still needed before a public release.
+evidence and the checks still needed before a stable release. The source is public; this remains a beta.
 
 The CLI command remains `claude-emote`. Its bundled third-party plugin is named
 `emote-companion` to satisfy current Claude Code plugin-name validation.

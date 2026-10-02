@@ -1,7 +1,7 @@
-# Private GitHub beta — 2026-10-02
+# GitHub source beta - public publication on 2026-10-03
 
 The core desktop and terminal companions are implemented and suitable for a
-private source review. This is not a completed public product release.
+public source review. Publishing the source does not make this a finished stable release. The original validation below was performed on October 2; the October 3 update changes the README and visibility.
 
 ## Published branches
 
