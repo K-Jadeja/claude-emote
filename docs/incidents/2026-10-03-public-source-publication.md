@@ -1,4 +1,4 @@
-# Public source publication ? October 3, 2026
+# Public source publication - October 3, 2026
 
 The owner explicitly requested public visibility for `K-Jadeja/claude-emote` and the separate `K-Jadeja/mcode-emote` repository. This Claude update changes the README opening to the owner's casual first-person style, links to the MCode version, and clarifies that public source remains a Windows beta.
 
